@@ -92,10 +92,25 @@ func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (re
 		return nil, fmt.Errorf("failed to analyze query for routing")
 	}
 
-	// NEW: MCP Integration
+	// ENHANCED: Intelligent MCP Integration with Command Execution
 	mcpContext, err := ma.mcpClient.ProcessQuery(ctx, query)
 	if err == nil && mcpContext != nil {
 		query.MCPContext = mcpContext
+		
+		// Log what commands were executed
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Info("MCP commands executed", map[string]interface{}{
+				"operations": mcpContext.Operations,
+				"data_keys":  ma.extractDataKeys(mcpContext.Data),
+			})
+		}
+	} else if err != nil {
+		// Log MCP failure but continue processing
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Warn("MCP processing failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	// Select best agent based on improved analysis
@@ -868,4 +883,13 @@ func (ma *ManagerAgent) evaluateSystemAgent(query *models.Query, analysis *Routi
 	}
 	
 	return score
+}
+
+// extractDataKeys extracts keys from MCP data for logging
+func (ma *ManagerAgent) extractDataKeys(data map[string]interface{}) []string {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	return keys
 }
