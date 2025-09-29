@@ -12,6 +12,7 @@ import (
 type MCPClient struct {
 	decisionEngine   *DecisionEngine
 	executor         *Executor
+	intelligentExecutor *IntelligentExecutor
 	filesystemServer *FilesystemServer
 	contextCache     *MCPContextCache
 	fileWatcher      *FileWatcher
@@ -26,6 +27,7 @@ func NewMCPClient() *MCPClient {
 	usageTracker := NewUsageTracker()
 	
 	client := &MCPClient{
+		intelligentExecutor: NewIntelligentExecutor(),
 		decisionEngine:   NewDecisionEngine(),
 		executor:         NewExecutor(),
 		filesystemServer: NewFilesystemServer(),
@@ -42,8 +44,8 @@ func NewMCPClient() *MCPClient {
 
 // ProcessQuery processes a query through MCP pipeline
 func (mc *MCPClient) ProcessQuery(ctx context.Context, query *models.Query) (*models.MCPContext, error) {
-	// Use predictive cache for intelligent caching and learning
-	return mc.predictiveCache.GetOrPredict(ctx, query)
+	// Use intelligent executor for command-based processing
+	return mc.intelligentExecutor.AnalyzeAndExecute(ctx, query)
 }
 
 // getProjectPath extracts project path from query context
