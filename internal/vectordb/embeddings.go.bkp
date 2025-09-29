@@ -1,0 +1,463 @@
+package vectordb
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/sashabaranov/go-openai"
+)
+
+// EmbeddingGenerator handles generation of embeddings for code
+type EmbeddingGenerator struct {
+	client      *openai.Client
+	model       string
+	dimension   int
+	rateLimiter *RateLimiter
+	cache       *EmbeddingCache
+}
+
+// EmbeddingCache provides caching for embeddings
+type EmbeddingCache struct {
+	cache   map[string][]float32
+	maxSize int
+}
+
+// RateLimiter handles API rate limiting
+type RateLimiter struct {
+	requests chan time.Time
+	interval time.Duration
+	maxRate  int
+}
+
+// EmbeddingRequest represents a request for embedding generation
+type EmbeddingRequest struct {
+	Content  string            `json:"content"`
+	Type     string            `json:"type"` // function, method, type, etc.
+	Language string            `json:"language"`
+	Context  map[string]string `json:"context"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// EmbeddingResponse represents the response from embedding generation
+type EmbeddingResponse struct {
+	Embedding  []float32         `json:"embedding"`
+	TokensUsed int               `json:"tokens_used"`
+	Model      string            `json:"model"`
+	Metadata   map[string]string `json:"metadata"`
+}
+
+// NewEmbeddingGenerator creates a new embedding generator
+func NewEmbeddingGenerator(model string) (*EmbeddingGenerator, error) {
+	apiKey := GetAPIKey("OPENAI_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("OpenAI API key not found")
+	}
+
+	client := openai.NewClient(apiKey)
+
+	// Determine dimension based on model
+	dimension := 1536 // Default for text-embedding-3-small
+	switch model {
+	case "text-embedding-3-small":
+		dimension = 1536
+	case "text-embedding-3-large":
+		dimension = 3072
+	case "text-embedding-ada-002":
+		dimension = 1536
+	}
+
+	return &EmbeddingGenerator{
+		client:      client,
+		model:       model,
+		dimension:   dimension,
+		rateLimiter: NewRateLimiter(1000, time.Minute), // 1000 requests per minute
+		cache:       NewEmbeddingCache(10000),          // Cache 10k embeddings
+	}, nil
+}
+
+// GenerateEmbedding generates an embedding for the given content
+func (eg *EmbeddingGenerator) GenerateEmbedding(content string) ([]float32, error) {
+	return eg.GenerateEmbeddingWithContext(context.Background(), content)
+}
+
+// GenerateEmbeddingWithContext generates an embedding with context
+func (eg *EmbeddingGenerator) GenerateEmbeddingWithContext(ctx context.Context, content string) ([]float32, error) {
+	// Preprocess content
+	processedContent := eg.preprocessContent(content)
+
+	// Check cache first
+	if cached := eg.cache.Get(processedContent); cached != nil {
+		return cached, nil
+	}
+
+	// Apply rate limiting
+	if err := eg.rateLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit error: %w", err)
+	}
+
+	// Create embedding request
+	request := openai.EmbeddingRequest{
+		Input: []string{processedContent},
+		Model: openai.EmbeddingModel(eg.model),
+	}
+
+	// Call OpenAI API
+	response, err := eg.client.CreateEmbeddings(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create embedding: %w", err)
+	}
+
+	if len(response.Data) == 0 {
+		return nil, fmt.Errorf("no embedding data returned")
+	}
+
+	embedding := response.Data[0].Embedding
+
+	// Cache the result
+	eg.cache.Set(processedContent, embedding)
+
+	return embedding, nil
+}
+
+// GenerateBatchEmbeddings generates embeddings for multiple pieces of content
+func (eg *EmbeddingGenerator) GenerateBatchEmbeddings(ctx context.Context, contents []string) ([][]float32, error) {
+	if len(contents) == 0 {
+		return [][]float32{}, nil
+	}
+
+	// OpenAI batch size limit
+	batchSize := 100
+	var allEmbeddings [][]float32
+
+	for i := 0; i < len(contents); i += batchSize {
+		end := i + batchSize
+		if end > len(contents) {
+			end = len(contents)
+		}
+
+		batch := contents[i:end]
+		batchEmbeddings, err := eg.generateBatchEmbeddings(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate batch embeddings: %w", err)
+		}
+
+		allEmbeddings = append(allEmbeddings, batchEmbeddings...)
+	}
+
+	return allEmbeddings, nil
+}
+
+// generateBatchEmbeddings generates embeddings for a single batch
+func (eg *EmbeddingGenerator) generateBatchEmbeddings(ctx context.Context, contents []string) ([][]float32, error) {
+	// Preprocess all contents
+	processedContents := make([]string, len(contents))
+	var needsEmbedding []int
+	embeddings := make([][]float32, len(contents))
+
+	for i, content := range contents {
+		processed := eg.preprocessContent(content)
+		processedContents[i] = processed
+
+		// Check cache
+		if cached := eg.cache.Get(processed); cached != nil {
+			embeddings[i] = cached
+		} else {
+			needsEmbedding = append(needsEmbedding, i)
+		}
+	}
+
+	// Generate embeddings for uncached content
+	if len(needsEmbedding) > 0 {
+		if err := eg.rateLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit error: %w", err)
+		}
+
+		inputTexts := make([]string, len(needsEmbedding))
+		for i, idx := range needsEmbedding {
+			inputTexts[i] = processedContents[idx]
+		}
+
+		request := openai.EmbeddingRequest{
+			Input: inputTexts,
+			Model: openai.EmbeddingModel(eg.model),
+		}
+
+		response, err := eg.client.CreateEmbeddings(ctx, request)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create batch embeddings: %w", err)
+		}
+
+		if len(response.Data) != len(needsEmbedding) {
+			return nil, fmt.Errorf("embedding count mismatch: expected %d, got %d",
+				len(needsEmbedding), len(response.Data))
+		}
+
+		// Store results and cache
+		for i, idx := range needsEmbedding {
+			embedding := response.Data[i].Embedding
+			embeddings[idx] = embedding
+			eg.cache.Set(processedContents[idx], embedding)
+		}
+	}
+
+	return embeddings, nil
+}
+
+// GenerateCodeEmbedding generates an embedding specifically for code with context
+func (eg *EmbeddingGenerator) GenerateCodeEmbedding(ctx context.Context, req *EmbeddingRequest) (*EmbeddingResponse, error) {
+	// Create contextual content for better embeddings
+	contextualContent := eg.createContextualContent(req)
+
+	// Generate embedding
+	embedding, err := eg.GenerateEmbeddingWithContext(ctx, contextualContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate code embedding: %w", err)
+	}
+
+	return &EmbeddingResponse{
+		Embedding:  embedding,
+		TokensUsed: eg.estimateTokens(contextualContent),
+		Model:      eg.model,
+		Metadata: map[string]string{
+			"content_type": req.Type,
+			"language":     req.Language,
+			"dimension":    fmt.Sprintf("%d", eg.dimension),
+		},
+	}, nil
+}
+
+// createContextualContent creates contextual content for better embeddings
+func (eg *EmbeddingGenerator) createContextualContent(req *EmbeddingRequest) string {
+	var parts []string
+
+	// Add language context
+	if req.Language != "" {
+		parts = append(parts, fmt.Sprintf("Language: %s", req.Language))
+	}
+
+	// Add type context
+	if req.Type != "" {
+		parts = append(parts, fmt.Sprintf("Type: %s", req.Type))
+	}
+
+	// Add contextual information
+	if req.Context != nil {
+		if packageName, ok := req.Context["package_name"]; ok && packageName != "" {
+			parts = append(parts, fmt.Sprintf("Package: %s", packageName))
+		}
+		if functionName, ok := req.Context["function_name"]; ok && functionName != "" {
+			parts = append(parts, fmt.Sprintf("Function: %s", functionName))
+		}
+		if typeName, ok := req.Context["type_name"]; ok && typeName != "" {
+			parts = append(parts, fmt.Sprintf("Type: %s", typeName))
+		}
+	}
+
+	// Add the main content
+	parts = append(parts, req.Content)
+
+	return strings.Join(parts, "\n")
+}
+
+// preprocessContent preprocesses content before embedding
+func (eg *EmbeddingGenerator) preprocessContent(content string) string {
+	// Remove excessive whitespace
+	content = regexp.MustCompile(`\s+`).ReplaceAllString(content, " ")
+
+	// Trim leading/trailing whitespace
+	content = strings.TrimSpace(content)
+
+	// Limit content length (OpenAI has token limits)
+	maxLength := 8000 // Conservative limit for token counting
+	if len(content) > maxLength {
+		content = content[:maxLength]
+	}
+
+	return content
+}
+
+// estimateTokens estimates the number of tokens in the content
+func (eg *EmbeddingGenerator) estimateTokens(content string) int {
+	// Rough estimation: ~4 characters per token for English text
+	return len(content) / 4
+}
+
+// ComputeSimilarity computes cosine similarity between two embeddings
+func (eg *EmbeddingGenerator) ComputeSimilarity(embedding1, embedding2 []float32) float32 {
+	if len(embedding1) != len(embedding2) {
+		return 0.0
+	}
+
+	var dotProduct, norm1, norm2 float32
+	for i := 0; i < len(embedding1); i++ {
+		dotProduct += embedding1[i] * embedding2[i]
+		norm1 += embedding1[i] * embedding1[i]
+		norm2 += embedding2[i] * embedding2[i]
+	}
+
+	if norm1 == 0.0 || norm2 == 0.0 {
+		return 0.0
+	}
+
+	return dotProduct / (sqrt32(norm1) * sqrt32(norm2))
+}
+
+// Helper function for square root
+func sqrt32(x float32) float32 {
+	if x == 0 {
+		return 0
+	}
+
+	// Newton's method approximation
+	guess := x / 2
+	for i := 0; i < 10; i++ { // 10 iterations should be sufficient
+		guess = (guess + x/guess) / 2
+	}
+	return guess
+}
+
+// NewEmbeddingCache creates a new embedding cache
+func NewEmbeddingCache(maxSize int) *EmbeddingCache {
+	return &EmbeddingCache{
+		cache:   make(map[string][]float32),
+		maxSize: maxSize,
+	}
+}
+
+// Get retrieves an embedding from cache
+func (ec *EmbeddingCache) Get(key string) []float32 {
+	if embedding, exists := ec.cache[key]; exists {
+		return embedding
+	}
+	return nil
+}
+
+// Set stores an embedding in cache
+func (ec *EmbeddingCache) Set(key string, embedding []float32) {
+	// Simple eviction policy: if cache is full, clear it
+	if len(ec.cache) >= ec.maxSize {
+		ec.cache = make(map[string][]float32)
+	}
+
+	ec.cache[key] = embedding
+}
+
+// Clear clears the cache
+func (ec *EmbeddingCache) Clear() {
+	ec.cache = make(map[string][]float32)
+}
+
+// Size returns the current cache size
+func (ec *EmbeddingCache) Size() int {
+	return len(ec.cache)
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter(maxRate int, interval time.Duration) *RateLimiter {
+	return &RateLimiter{
+		requests: make(chan time.Time, maxRate),
+		interval: interval,
+		maxRate:  maxRate,
+	}
+}
+
+// Wait waits for rate limiting
+func (rl *RateLimiter) Wait(ctx context.Context) error {
+	now := time.Now()
+
+	select {
+	case rl.requests <- now:
+		// Check if we need to clean old requests
+		go rl.cleanOldRequests(now)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(time.Second):
+		// If we can't immediately get a slot, wait a bit and try again
+		return rl.Wait(ctx)
+	}
+}
+
+// cleanOldRequests removes old requests from the rate limiter
+func (rl *RateLimiter) cleanOldRequests(now time.Time) {
+	cutoff := now.Add(-rl.interval)
+
+	for {
+		select {
+		case requestTime := <-rl.requests:
+			if requestTime.After(cutoff) {
+				// Put it back and stop cleaning
+				select {
+				case rl.requests <- requestTime:
+				default:
+					// Channel full, stop cleaning
+				}
+				return
+			}
+			// Request is too old, discard it
+		default:
+			// No more requests to clean
+			return
+		}
+	}
+}
+
+// GetAPIKey retrieves API key from environment
+func GetAPIKey(keyName string) string {
+	return os.Getenv(keyName)
+}
+
+// EmbeddingModel represents different embedding models
+type EmbeddingModel struct {
+	Name      string  `json:"name"`
+	Dimension int     `json:"dimension"`
+	MaxTokens int     `json:"max_tokens"`
+	CostPer1K float64 `json:"cost_per_1k"`
+}
+
+// GetSupportedModels returns list of supported embedding models
+func GetSupportedModels() []EmbeddingModel {
+	return []EmbeddingModel{
+		{
+			Name:      "text-embedding-3-small",
+			Dimension: 1536,
+			MaxTokens: 8191,
+			CostPer1K: 0.00002,
+		},
+		{
+			Name:      "text-embedding-3-large",
+			Dimension: 3072,
+			MaxTokens: 8191,
+			CostPer1K: 0.00013,
+		},
+		{
+			Name:      "text-embedding-ada-002",
+			Dimension: 1536,
+			MaxTokens: 8191,
+			CostPer1K: 0.0001,
+		},
+	}
+}
+
+// GetDimension returns the embedding dimension for a model
+func (eg *EmbeddingGenerator) GetDimension() int {
+	return eg.dimension
+}
+
+// GetModel returns the current model name
+func (eg *EmbeddingGenerator) GetModel() string {
+	return eg.model
+}
+
+// GetCacheStats returns cache statistics
+func (eg *EmbeddingGenerator) GetCacheStats() map[string]interface{} {
+	return map[string]interface{}{
+		"cache_size":     eg.cache.Size(),
+		"cache_max_size": eg.cache.maxSize,
+		"hit_rate":       0.0, // Would need to track hits/misses for actual rate
+	}
+}

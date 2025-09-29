@@ -1,0 +1,74 @@
+display:
+  theme: "dark"  # dark, light, auto
+  
+  colors:
+    primary: "#00D4AA"      # Cyan/teal for prompts and highlights
+    secondary: "#FF6B6B"    # Red for errors and warnings
+    success: "#51CF66"      # Green for success messages
+    warning: "#FFD93D"      # Yellow for warnings
+    info: "#74C0FC"         # Blue for info messages
+    muted: "#868E96"        # Gray for less important text
+    
+    code:
+      keyword: "#FF79C6"     # Pink for keywords
+      string: "#F1FA8C"      # Yellow for strings
+      comment: "#6272A4"     # Gray for comments
+      function: "#50FA7B"    # Green for functions
+      variable: "#8BE9FD"    # Cyan for variables
+      number: "#BD93F9"      # Purple for numbers
+      
+  line_numbers:
+    enabled: true
+    width: 4
+    padding: 1
+    color: "#6272A4"       # Muted gray
+    highlight_color: "#FF79C6"  # Pink for current/changed lines
+    
+  progress:
+    style: "blocks"        # blocks, bar, spinner, dots
+    width: 50
+    show_percentage: true
+    show_eta: true
+    animation_speed: "100ms"
+    
+  streaming:
+    char_delay: "1ms"      # Delay between characters for effect
+    line_delay: "10ms"     # Delay between lines
+    enable_typewriter: true
+    buffer_size: 1024
+    
+  layout:
+    max_width: 120
+    indent_size: 2
+    code_block_padding: 1
+    section_spacing: 1
+    
+  symbols:
+    bullet: "├─"
+    last_bullet: "└─"
+    pipe: "│"
+    success: "✅"
+    error: "❌"
+    warning: "⚠️"
+    info: "💡"
+    search: "🔍"
+    code: "📝"
+    test: "🧪"
+    docs: "📚"
+    debug: "🐛"
+    
+borders:
+  enabled: true
+  style: "rounded"       # rounded, sharp, double, ascii
+  title_position: "center"
+  
+headers:
+  show_provider: true
+  show_tokens: true
+  show_timing: true
+  show_cost: true
+  format: "compact"      # compact, detailed, minimal
+
+  # Why this file: 
+  # This controls the visual presentation of the CLI - colors, syntax highlighting, progress bars, line numbers, and streaming effects. 
+  # It ensures a beautiful, consistent user experience with proper visual feedback.
