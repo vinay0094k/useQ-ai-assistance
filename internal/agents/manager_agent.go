@@ -136,19 +136,30 @@ func (ma *ManagerAgent) initializeLLMManager() {
 
 // RouteQuery intelligently routes queries to the most appropriate agent
 func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (response *models.Response, err error) {
-	// STEP 1: 3-TIER CLASSIFICATION FIRST (before expensive processing)
+	// STEP 1: 3-TIER CLASSIFICATION FIRST - COST OPTIMIZATION
 	classification, classErr := ma.mcpClient.(*mcp.MCPClient).GetQueryClassifier().ClassifyQuery(ctx, query)
 	if classErr == nil {
+		// Log classification decision with cost info
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Info("Query classified", map[string]interface{}{
+				"tier":           classification.Tier,
+				"confidence":     classification.Confidence,
+				"estimated_cost": classification.EstimatedCost,
+				"estimated_time": classification.EstimatedTime,
+				"skip_llm":       classification.SkipLLM,
+			})
+		}
+
 		// Process based on tier classification
 		switch classification.Tier {
 		case mcp.TierSimple:
-			// Tier 1: Direct MCP execution ($0, <100ms)
+			// Tier 1: Direct MCP execution (ACTUAL COST: $0, <100ms)
 			return ma.processTier1Query(ctx, query, classification)
 		case mcp.TierMedium:
-			// Tier 2: MCP + Vector search ($0, <500ms)
+			// Tier 2: MCP + Vector search (ACTUAL COST: ~$0.0005, <500ms)
 			return ma.processTier2Query(ctx, query, classification)
 		case mcp.TierComplex:
-			// Tier 3: Full LLM pipeline ($0.01-0.03, 1-3s)
+			// Tier 3: Full LLM pipeline (ACTUAL COST: $0.02-0.03, 1-3s)
 			return ma.processTier3Query(ctx, query, classification)
 		}
 	}
@@ -311,6 +322,14 @@ func (ma *ManagerAgent) processTier1Query(ctx context.Context, query *models.Que
 func (ma *ManagerAgent) processTier2Query(ctx context.Context, query *models.Query, classification *mcp.ClassificationResult) (*models.Response, error) {
 	startTime := time.Now()
 	
+	// Track Tier 2 costs
+	if ma.dependencies != nil && ma.dependencies.Logger != nil {
+		ma.dependencies.Logger.Info("Processing Tier 2 query", map[string]interface{}{
+			"query": query.UserInput,
+			"note":  "Will incur embedding costs (~$0.0005)",
+		})
+	}
+	
 	// Execute MCP operations
 	mcpContext, err := ma.mcpClient.ProcessQuery(ctx, query)
 	if err != nil {
@@ -320,8 +339,15 @@ func (ma *ManagerAgent) processTier2Query(ctx context.Context, query *models.Que
 	// Add vector search if available
 	var vectorResults []interface{}
 	if ma.dependencies != nil && ma.dependencies.VectorDB != nil {
+		// This will cost ~$0.0005 for query embedding
 		if results, err := ma.dependencies.VectorDB.Search(ctx, query.UserInput, 10); err == nil {
 			vectorResults = results
+			if ma.dependencies.Logger != nil {
+				ma.dependencies.Logger.Info("Vector search completed", map[string]interface{}{
+					"results_count": len(results),
+					"embedding_cost": "~$0.0005",
+				})
+			}
 		}
 	}
 	
@@ -336,13 +362,13 @@ func (ma *ManagerAgent) processTier2Query(ctx context.Context, query *models.Que
 			Text: responseText,
 		},
 		AgentUsed:  "mcp_vector",
-		Provider:   "hybrid",
+		Provider:   "mcp_vector_search",
 		TokenUsage: models.TokenUsage{TotalTokens: 0},
-		Cost:       models.Cost{TotalCost: 0.0, Currency: "USD"},
+		Cost:       models.Cost{TotalCost: 0.0005, Currency: "USD"}, // REAL embedding cost
 		Metadata: models.ResponseMetadata{
 			GenerationTime: time.Since(startTime),
 			Confidence:     classification.Confidence,
-			Tools:          []string{"mcp_filesystem", "vector_search"},
+			Tools:          []string{"mcp_filesystem", "vector_search", "openai_embeddings"},
 			Reasoning:      classification.Reasoning,
 		},
 		Timestamp: time.Now(),

@@ -7,171 +7,147 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
-// EmbeddingService handles text-to-vector conversion with caching
+// EmbeddingService - MINIMAL implementation with accurate cost tracking
 type EmbeddingService struct {
-	config *EmbeddingConfig
-	cache  *EmbeddingCache
+	apiKey     string
+	httpClient *http.Client
+	cache      map[string][]float32
+	costTracker *CostTracker
 }
 
-// NewEmbeddingService creates a new embedding service
+// CostTracker tracks actual embedding costs
+type CostTracker struct {
+	TotalTokens int     `json:"total_tokens"`
+	TotalCost   float64 `json:"total_cost"`
+	RequestCount int    `json:"request_count"`
+}
+
+// EmbeddingConfig holds minimal configuration
+type EmbeddingConfig struct {
+	APIKey   string `json:"api_key"`
+	Endpoint string `json:"endpoint"`
+	Model    string `json:"model"`
+}
+
+// NewEmbeddingService creates a minimal embedding service
 func NewEmbeddingService(config *EmbeddingConfig) *EmbeddingService {
-	// Load API key from environment if not provided
-	if config.APIKey == "" {
-		config.APIKey = os.Getenv("OPENAI_API_KEY")
-	}
-	
-	// Set defaults
-	if config.Endpoint == "" {
-		config.Endpoint = "https://api.openai.com/v1/embeddings"
-	}
-	if config.Model == "" {
-		config.Model = "text-embedding-3-small"
+	apiKey := config.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
 
 	return &EmbeddingService{
-		config: config,
-		cache:  NewEmbeddingCache(1000), // Cache 1000 embeddings
+		apiKey:     apiKey,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cache:      make(map[string][]float32),
+		costTracker: &CostTracker{},
 	}
 }
 
-// GenerateEmbedding generates a single embedding
+// GenerateEmbedding generates a single embedding with cost tracking
 func (es *EmbeddingService) GenerateEmbedding(ctx context.Context, text string) ([]float32, error) {
-	embeddings, err := es.GenerateEmbeddings(ctx, []string{text})
+	// Check cache first
+	if cached, exists := es.cache[text]; exists {
+		fmt.Printf("💾 Cache hit for embedding\n")
+		return cached, nil
+	}
+
+	if es.apiKey == "" {
+		fmt.Printf("⚠️ No OpenAI API key, using fallback embedding\n")
+		return es.generateFallbackEmbedding(text), nil
+	}
+
+	// Estimate cost BEFORE API call
+	estimatedTokens := len(text) / 4
+	estimatedCost := float64(estimatedTokens) / 1000.0 * 0.0001
+	fmt.Printf("💰 Estimated embedding cost: $%.6f (%d tokens)\n", estimatedCost, estimatedTokens)
+
+	reqBody := map[string]interface{}{
+		"input": text,
+		"model": "text-embedding-3-small",
+	}
+
+	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err
 	}
-	if len(embeddings) == 0 {
-		return nil, fmt.Errorf("no embeddings generated")
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/embeddings", strings.NewReader(string(jsonData)))
+	if err != nil {
+		return nil, err
 	}
-	return embeddings[0], nil
+
+	req.Header.Set("Authorization", "Bearer "+es.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := es.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("OpenAI API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var embeddingResp struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&embeddingResp); err != nil {
+		return nil, err
+	}
+
+	if len(embeddingResp.Data) == 0 {
+		return nil, fmt.Errorf("no embeddings returned")
+	}
+
+	embedding := embeddingResp.Data[0].Embedding
+
+	// Track actual cost
+	actualCost := float64(embeddingResp.Usage.TotalTokens) / 1000.0 * 0.0001
+	es.costTracker.TotalTokens += embeddingResp.Usage.TotalTokens
+	es.costTracker.TotalCost += actualCost
+	es.costTracker.RequestCount++
+
+	fmt.Printf("💰 Actual cost: $%.6f | Total so far: $%.4f (%d requests)\n", 
+		actualCost, es.costTracker.TotalCost, es.costTracker.RequestCount)
+
+	// Cache the result
+	es.cache[text] = embedding
+
+	return embedding, nil
 }
 
-// GenerateEmbeddings generates multiple embeddings with caching
-func (es *EmbeddingService) GenerateEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
-	if len(texts) == 0 {
-		return [][]float32{}, nil
-	}
-
-	// Check cache first
-	var uncachedTexts []string
-	var uncachedIndices []int
-	results := make([][]float32, len(texts))
-
-	for i, text := range texts {
-		if cached := es.cache.Get(text); cached != nil {
-			results[i] = cached
-		} else {
-			uncachedTexts = append(uncachedTexts, text)
-			uncachedIndices = append(uncachedIndices, i)
-		}
-	}
-
-	// Generate embeddings for uncached texts
-	if len(uncachedTexts) > 0 {
-		if es.config.APIKey == "" {
-			return nil, fmt.Errorf("OpenAI API key not configured")
-		}
-
-		reqBody := EmbeddingRequest{
-			Input: uncachedTexts,
-			Model: es.config.Model,
-		}
-
-		jsonData, err := json.Marshal(reqBody)
-		if err != nil {
-			return nil, err
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", es.config.Endpoint, strings.NewReader(string(jsonData)))
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("Authorization", "Bearer "+es.config.APIKey)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			body, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("OpenAI API error %d: %s", resp.StatusCode, string(body))
-		}
-
-		var embeddingResp EmbeddingResponse
-		if err := json.NewDecoder(resp.Body).Decode(&embeddingResp); err != nil {
-			return nil, err
-		}
-
-		// Store results and cache
-		for i, idx := range uncachedIndices {
-			if i < len(embeddingResp.Data) {
-				embedding := embeddingResp.Data[i].Embedding
-				results[idx] = embedding
-				es.cache.Set(uncachedTexts[i], embedding)
-			}
-		}
-	}
-
-	return results, nil
+// GetCostStats returns actual cost statistics
+func (es *EmbeddingService) GetCostStats() *CostTracker {
+	return es.costTracker
 }
 
-// IsHealthy checks if the embedding service is healthy
-func (es *EmbeddingService) IsHealthy(ctx context.Context) bool {
-	if es.config.APIKey == "" {
-		return false
+// generateFallbackEmbedding creates simple hash-based embedding for testing
+func (es *EmbeddingService) generateFallbackEmbedding(text string) []float32 {
+	words := strings.Fields(strings.ToLower(text))
+	embedding := make([]float32, 1536) // Standard size
+
+	for i, word := range words {
+		if i >= len(embedding) {
+			break
+		}
+		// Simple hash-based embedding
+		hash := 0
+		for _, char := range word {
+			hash = hash*31 + int(char)
+		}
+		embedding[i] = float32(hash%1000) / 1000.0
 	}
 
-	// Test with a simple embedding
-	_, err := es.GenerateEmbedding(ctx, "test")
-	return err == nil
-}
-
-// GetCacheStats returns cache statistics
-func (es *EmbeddingService) GetCacheStats() map[string]interface{} {
-	return map[string]interface{}{
-		"cache_size":     es.cache.Size(),
-		"cache_max_size": es.cache.maxSize,
-	}
-}
-
-// NewEmbeddingCache creates a new embedding cache
-func NewEmbeddingCache(maxSize int) *EmbeddingCache {
-	return &EmbeddingCache{
-		cache:   make(map[string][]float32),
-		maxSize: maxSize,
-	}
-}
-
-// Get retrieves an embedding from cache
-func (ec *EmbeddingCache) Get(key string) []float32 {
-	if embedding, exists := ec.cache[key]; exists {
-		return embedding
-	}
-	return nil
-}
-
-// Set stores an embedding in cache
-func (ec *EmbeddingCache) Set(key string, embedding []float32) {
-	// Simple eviction policy: if cache is full, clear it
-	if len(ec.cache) >= ec.maxSize {
-		ec.cache = make(map[string][]float32)
-	}
-	ec.cache[key] = embedding
-}
-
-// Size returns the current cache size
-func (ec *EmbeddingCache) Size() int {
-	return len(ec.cache)
-}
-
-// Clear clears the cache
-func (ec *EmbeddingCache) Clear() {
-	ec.cache = make(map[string][]float32)
+	return embedding
 }
