@@ -604,19 +604,84 @@ func runInteractiveCLI(ctx context.Context, cliApp *app.CLIApplication) error {
 
 // testMCPCommands tests the MCP command execution system
 func testMCPCommands(cliApp *app.CLIApplication) {
-	fmt.Printf("🧪 Testing MCP Command Execution System\n")
+	fmt.Printf("🧪 Testing 3-Tier Query Classification System\n")
 	fmt.Printf("═══════════════════════════════════════\n")
 	
-	testQueries := []string{
-		"show me current CPU usage",
-		"how many files are indexed",
-		"show project structure", 
-		"list all Go files",
-		"git status",
+	// Test queries for each tier
+	tier1Queries := []string{
+		"list files",
+		"show directory",
+		"memory usage",
+		"system status",
 	}
 	
-	for i, testQuery := range testQueries {
-		fmt.Printf("\n%d. Testing: '%s'\n", i+1, testQuery)
+	tier2Queries := []string{
+		"find authentication code",
+		"search for error handling",
+		"how many Go files",
+		"show all functions",
+	}
+	
+	tier3Queries := []string{
+		"explain the flow of this application",
+		"create a microservice for authentication",
+		"analyze the architecture",
+		"how does the caching system work",
+	}
+	
+	fmt.Printf("\n🟢 TIER 1 TESTS (Simple - Direct MCP, $0, <100ms):\n")
+	for i, testQuery := range tier1Queries {
+		ma.testSingleQuery(cliApp, i+1, testQuery, "Tier 1")
+	}
+	
+	fmt.Printf("\n🟡 TIER 2 TESTS (Medium - MCP + Vector, $0, <500ms):\n")
+	for i, testQuery := range tier2Queries {
+		ma.testSingleQuery(cliApp, i+1, testQuery, "Tier 2")
+	}
+	
+	fmt.Printf("\n🔴 TIER 3 TESTS (Complex - Full LLM Pipeline, $0.01-0.03, 1-3s):\n")
+	for i, testQuery := range tier3Queries {
+		ma.testSingleQuery(cliApp, i+1, testQuery, "Tier 3")
+	}
+	
+	fmt.Printf("\n✅ 3-Tier Classification Testing Completed\n\n")
+}
+
+func testSingleQuery(cliApp *app.CLIApplication, num int, testQuery, expectedTier string) {
+	fmt.Printf("  %d. Testing: '%s'\n", num, testQuery)
+	start := time.Now()
+	
+	// Create test query
+	query := &models.Query{
+		ID:        fmt.Sprintf("test_%d", time.Now().UnixNano()),
+		UserInput: testQuery,
+		Language:  "go",
+		Timestamp: time.Now(),
+	}
+	
+	// Process through the system
+	ctx := context.Background()
+	response, err := cliApp.ProcessQuery(ctx, query)
+	duration := time.Since(start)
+	
+	if err != nil {
+		fmt.Printf("     ❌ Failed: %v\n", err)
+	} else {
+		fmt.Printf("     ✅ Success: %s | %v | $%.4f\n", 
+			response.AgentUsed, duration, response.Cost.TotalCost)
+		
+		// Show classification accuracy
+		if strings.Contains(response.AgentUsed, "mcp_direct") && expectedTier == "Tier 1" {
+			fmt.Printf("     🎯 Correctly classified as %s\n", expectedTier)
+		} else if strings.Contains(response.AgentUsed, "mcp_vector") && expectedTier == "Tier 2" {
+			fmt.Printf("     🎯 Correctly classified as %s\n", expectedTier)
+		} else if strings.Contains(response.AgentUsed, "intelligent") && expectedTier == "Tier 3" {
+			fmt.Printf("     🎯 Correctly classified as %s\n", expectedTier)
+		} else {
+			fmt.Printf("     ⚠️ Classification mismatch - expected %s\n", expectedTier)
+		}
+	}
+}
 		fmt.Printf("   🔄 Processing...\n")
 		
 		// Create test query

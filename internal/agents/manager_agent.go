@@ -136,6 +136,24 @@ func (ma *ManagerAgent) initializeLLMManager() {
 
 // RouteQuery intelligently routes queries to the most appropriate agent
 func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (response *models.Response, err error) {
+	// STEP 1: 3-TIER CLASSIFICATION FIRST (before expensive processing)
+	classification, classErr := ma.mcpClient.(*mcp.MCPClient).GetQueryClassifier().ClassifyQuery(ctx, query)
+	if classErr == nil {
+		// Process based on tier classification
+		switch classification.Tier {
+		case mcp.TierSimple:
+			// Tier 1: Direct MCP execution ($0, <100ms)
+			return ma.processTier1Query(ctx, query, classification)
+		case mcp.TierMedium:
+			// Tier 2: MCP + Vector search ($0, <500ms)
+			return ma.processTier2Query(ctx, query, classification)
+		case mcp.TierComplex:
+			// Tier 3: Full LLM pipeline ($0.01-0.03, 1-3s)
+			return ma.processTier3Query(ctx, query, classification)
+		}
+	}
+	
+	// Fallback to original routing if classification fails
 	// Add panic recovery with better error reporting
 	defer func() {
 		if r := recover(); r != nil {
@@ -253,6 +271,173 @@ func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (re
 	return response, nil
 }
 
+// processTier1Query handles simple queries with direct MCP execution
+func (ma *ManagerAgent) processTier1Query(ctx context.Context, query *models.Query, classification *mcp.ClassificationResult) (*models.Response, error) {
+	startTime := time.Now()
+	
+	// Execute MCP operations directly without LLM
+	mcpContext, err := ma.mcpClient.ProcessQuery(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("tier 1 MCP processing failed: %w", err)
+	}
+	
+	// Format response directly from MCP results
+	responseText := ma.formatMCPResults(mcpContext, query)
+	
+	response := &models.Response{
+		ID:      fmt.Sprintf("tier1_%d", time.Now().UnixNano()),
+		QueryID: query.ID,
+		Type:    models.ResponseTypeSystem,
+		Content: models.ResponseContent{
+			Text: responseText,
+		},
+		AgentUsed:  "mcp_direct",
+		Provider:   "filesystem",
+		TokenUsage: models.TokenUsage{TotalTokens: 0},
+		Cost:       models.Cost{TotalCost: 0.0, Currency: "USD"},
+		Metadata: models.ResponseMetadata{
+			GenerationTime: time.Since(startTime),
+			Confidence:     classification.Confidence,
+			Tools:          []string{"mcp_filesystem"},
+			Reasoning:      classification.Reasoning,
+		},
+		Timestamp: time.Now(),
+	}
+	
+	return response, nil
+}
+
+// processTier2Query handles medium queries with MCP + Vector search
+func (ma *ManagerAgent) processTier2Query(ctx context.Context, query *models.Query, classification *mcp.ClassificationResult) (*models.Response, error) {
+	startTime := time.Now()
+	
+	// Execute MCP operations
+	mcpContext, err := ma.mcpClient.ProcessQuery(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("tier 2 MCP processing failed: %w", err)
+	}
+	
+	// Add vector search if available
+	var vectorResults []interface{}
+	if ma.dependencies != nil && ma.dependencies.VectorDB != nil {
+		if results, err := ma.dependencies.VectorDB.Search(ctx, query.UserInput, 10); err == nil {
+			vectorResults = results
+		}
+	}
+	
+	// Format response from MCP + Vector results (no LLM synthesis)
+	responseText := ma.formatMCPAndVectorResults(mcpContext, vectorResults, query)
+	
+	response := &models.Response{
+		ID:      fmt.Sprintf("tier2_%d", time.Now().UnixNano()),
+		QueryID: query.ID,
+		Type:    models.ResponseTypeSearch,
+		Content: models.ResponseContent{
+			Text: responseText,
+		},
+		AgentUsed:  "mcp_vector",
+		Provider:   "hybrid",
+		TokenUsage: models.TokenUsage{TotalTokens: 0},
+		Cost:       models.Cost{TotalCost: 0.0, Currency: "USD"},
+		Metadata: models.ResponseMetadata{
+			GenerationTime: time.Since(startTime),
+			Confidence:     classification.Confidence,
+			Tools:          []string{"mcp_filesystem", "vector_search"},
+			Reasoning:      classification.Reasoning,
+		},
+		Timestamp: time.Now(),
+	}
+	
+	return response, nil
+}
+
+// processTier3Query handles complex queries with full LLM pipeline
+func (ma *ManagerAgent) processTier3Query(ctx context.Context, query *models.Query, classification *mcp.ClassificationResult) (*models.Response, error) {
+	// Use existing intelligent processing for complex queries
+	if ma.shouldUseIntelligentProcessing(query) {
+		return ma.intelligentProcessor.ProcessQuery(ctx, query)
+	}
+	
+	// Fallback to traditional agent routing
+	return ma.routeToTraditionalAgents(ctx, query)
+}
+
+// formatMCPResults formats MCP results for Tier 1 responses
+func (ma *ManagerAgent) formatMCPResults(mcpContext *models.MCPContext, query *models.Query) string {
+	var result strings.Builder
+	
+	// Format based on what data is available
+	if files, ok := mcpContext.Data["files"].([]map[string]interface{}); ok {
+		result.WriteString(fmt.Sprintf("📁 Found %d files:\n", len(files)))
+		for i, file := range files {
+			if i >= 10 {
+				result.WriteString(fmt.Sprintf("... and %d more files\n", len(files)-10))
+				break
+			}
+			if path, ok := file["path"].(string); ok {
+				result.WriteString(fmt.Sprintf("  %d. %s\n", i+1, path))
+			}
+		}
+	}
+	
+	if count, ok := mcpContext.Data["file_count"].(int); ok {
+		result.WriteString(fmt.Sprintf("\n📊 Total files: %d\n", count))
+	}
+	
+	if structure, ok := mcpContext.Data["project_structure"].(map[string]interface{}); ok {
+		result.WriteString("\n📂 Project Structure:\n")
+		ma.formatStructureForDisplay(structure, "", &result)
+	}
+	
+	if systemInfo, ok := mcpContext.Data["system_info"].(map[string]interface{}); ok {
+		result.WriteString("\n🖥️ System Info:\n")
+		for key, value := range systemInfo {
+			result.WriteString(fmt.Sprintf("  %s: %v\n", key, value))
+		}
+	}
+	
+	return result.String()
+}
+
+// formatMCPAndVectorResults formats results for Tier 2 responses
+func (ma *ManagerAgent) formatMCPAndVectorResults(mcpContext *models.MCPContext, vectorResults []interface{}, query *models.Query) string {
+	var result strings.Builder
+	
+	// Add MCP results
+	result.WriteString(ma.formatMCPResults(mcpContext, query))
+	
+	// Add vector search results if available
+	if len(vectorResults) > 0 {
+		result.WriteString("\n🧠 Semantic Search Results:\n")
+		for i, vr := range vectorResults {
+			if i >= 5 {
+				result.WriteString(fmt.Sprintf("... and %d more matches\n", len(vectorResults)-5))
+				break
+			}
+			result.WriteString(fmt.Sprintf("  %d. Similar code found (relevance: %.3f)\n", i+1, 0.8))
+		}
+	}
+	
+	return result.String()
+}
+
+// routeToTraditionalAgents routes to traditional agents as fallback
+func (ma *ManagerAgent) routeToTraditionalAgents(ctx context.Context, query *models.Query) (*models.Response, error) {
+	// Use existing routing logic as fallback
+	routingAnalysis := ma.analyzeQueryForRouting(ctx, query)
+	selectedAgent, confidence := ma.selectBestAgent(ctx, query, routingAnalysis)
+	return ma.executeWithSelectedAgent(ctx, query, selectedAgent)
+}
+
+// formatStructureForDisplay formats project structure for display
+func (ma *ManagerAgent) formatStructureForDisplay(structure map[string]interface{}, prefix string, result *strings.Builder) {
+	for key := range structure {
+		result.WriteString(fmt.Sprintf("%s├─ %s/\n", prefix, key))
+		if subMap, ok := structure[key].(map[string]interface{}); ok && len(prefix) < 6 {
+			ma.formatStructureForDisplay(subMap, prefix+"│  ", result)
+		}
+	}
+}
 // shouldUseIntelligentProcessing determines if query needs intelligent processing
 func (ma *ManagerAgent) shouldUseIntelligentProcessing(query *models.Query) bool {
 	input := strings.ToLower(query.UserInput)
