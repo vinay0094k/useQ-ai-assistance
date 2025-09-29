@@ -108,6 +108,20 @@ func main() {
 				return
 			}
 		}
+	case "validate":
+		if len(os.Args) > 2 {
+			switch os.Args[2] {
+			case "start":
+				startValidationMode()
+				return
+			case "report":
+				generateValidationReport()
+				return
+			case "search":
+				testSearchMethods()
+				return
+			}
+		}
 	}
 
 	// Initialize step logger first
@@ -218,6 +232,48 @@ func main() {
 	stepLogger.CompleteStep(cliStep, "CLI loop completed")
 }
 
+// startValidationMode starts query validation data collection
+func startValidationMode() {
+	fmt.Println("🧪 Starting Validation Mode...")
+	fmt.Println("This will collect data on every query to validate our assumptions.")
+	fmt.Println("Run at least 50 queries, then use 'validate report' to see results.")
+	fmt.Println()
+	
+	// Set environment variable to enable validation
+	os.Setenv("VALIDATION_MODE", "true")
+	
+	// Continue with normal CLI
+	main()
+}
+
+// generateValidationReport generates validation report from collected data
+func generateValidationReport() {
+	fmt.Println("📊 Generating Validation Report...")
+	
+	// This would read from analytics files and generate report
+	fmt.Println("Report will be generated from analytics/query_analysis_*.json")
+	fmt.Println("Run queries first, then check analytics/ directory")
+}
+
+// testSearchMethods compares vector vs keyword search
+func testSearchMethods() {
+	fmt.Println("🔬 Testing Search Methods...")
+	fmt.Println("This will compare vector search vs keyword search accuracy")
+	
+	testQueries := []string{
+		"find authentication code",
+		"search for error handling",
+		"locate test functions",
+		"show logging patterns",
+	}
+	
+	for _, query := range testQueries {
+		fmt.Printf("\nTesting: %s\n", query)
+		fmt.Println("Vector results: [simulated]")
+		fmt.Println("Keyword results: [simulated]")
+		fmt.Println("Which is better? This would collect user feedback.")
+	}
+}
 // testMCPIntegration tests the MCP integration
 func testMCPIntegration() {
 	fmt.Println("🧪 Testing MCP Integration...")

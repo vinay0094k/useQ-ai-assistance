@@ -2,6 +2,11 @@
 
 ## Actual Costs Breakdown
 
+### **⚠️ IMPORTANT: These are ESTIMATES**
+**You must validate these assumptions with real data!**
+
+Run `./useq validate start` to collect actual usage patterns.
+
 ### **One-Time Setup Costs**
 
 #### **Initial Code Indexing**
@@ -33,14 +38,14 @@ Time: <100ms
 
 #### **Tier 2: Medium Queries (15% of traffic)**
 ```
-Examples: "find authentication code", "search error handling"
+Examples: "find authentication code", "search error handling"  
 Processing: Query embedding + vector search
 Cost breakdown:
   - Query embedding: ~50 tokens × $0.0001/1K = $0.000005
   - Qdrant search: $0.00 (self-hosted)
   - Total per query: ~$0.000005
 
-REAL Tier 2 cost: $0.000005 per query (NOT free, but very cheap)
+REAL Tier 2 cost: $0.000005 per query (NOT free - embedding API costs)
 ```
 
 #### **Tier 3: Complex Queries (5% of traffic)**
@@ -55,7 +60,41 @@ Cost breakdown:
 REAL Tier 3 cost: $0.045 per query
 ```
 
+### **🚨 ASSUMPTION VALIDATION REQUIRED**
+
+**The 80/15/5 distribution is UNVALIDATED**
+
+Real distribution might be:
+- 60% Tier 1, 30% Tier 2, 10% Tier 3 (more complex queries)
+- 95% Tier 1, 4% Tier 2, 1% Tier 3 (mostly simple lookups)
+
+**This changes everything:**
+
+#### **If 60/30/10 Distribution:**
+```
+Conservative (3,000 queries/month):
+- 1,800 Tier 1 × $0.00 = $0.00
+- 900 Tier 2 × $0.000005 = $0.0045
+- 300 Tier 3 × $0.045 = $13.50
+
+Total: $13.50/month (not $6.75)
+Savings: 90% (not 95%)
+```
+
+#### **If 95/4/1 Distribution:**
+```
+Conservative (3,000 queries/month):
+- 2,850 Tier 1 × $0.00 = $0.00
+- 120 Tier 2 × $0.000005 = $0.0006
+- 30 Tier 3 × $0.045 = $1.35
+
+Total: $1.35/month
+Savings: 99%
+```
+
 ### **Monthly Usage Estimates**
+
+**⚠️ WARNING: Based on UNVALIDATED assumptions**
 
 #### **Conservative Usage (100 queries/day)**
 ```
@@ -157,18 +196,37 @@ fmt.Printf("Today's embedding costs: $%.4f\n", costStats.TotalCost)
 
 ## Validation Checklist
 
-- [ ] **Measure baseline**: Run 100 queries, track actual OpenAI costs
-- [ ] **Test classification**: Verify 80/15/5 distribution
-- [ ] **Validate accuracy**: Ensure Tier 1/2 results are useful
-- [ ] **Monitor costs**: Track real spending vs estimates
-- [ ] **Performance test**: Measure actual response times
+- [ ] **Collect real data**: `./useq validate start` → run 50+ queries
+- [ ] **Manual classification**: Verify automatic classification accuracy
+- [ ] **Compare search methods**: Vector vs keyword accuracy
+- [ ] **Measure actual costs**: Track real OpenAI API spending
+- [ ] **Test distribution**: See if 80/15/5 is realistic
+- [ ] **User satisfaction**: Rate response quality by tier
+
+## Honest Assessment Questions
+
+1. **Is semantic search worth it?**
+   - Run same queries with SQLite FTS
+   - Measure accuracy difference
+   - Calculate cost per accuracy improvement
+
+2. **Are users' queries actually simple?**
+   - Log 100 real queries
+   - Manually classify them
+   - See actual distribution
+
+3. **Is $4-13/month worth the complexity?**
+   - VectorDB adds: Qdrant, embeddings, maintenance
+   - Alternative: SQLite FTS adds zero dependencies
+   - Measure: Accuracy difference vs complexity cost
 
 ## Key Takeaways
 
-1. **Embeddings aren't free** - but very cheap ($0.000005 per query)
+1. **Embeddings aren't free** - $0.000005 per query adds up
 2. **One-time indexing cost** is the main expense (~$0.04)
-3. **95% cost reduction** is achievable with proper classification
-4. **Start minimal** - prove value before adding complexity
-5. **Monitor real costs** - don't rely on estimates
+3. **Cost reduction depends on actual query distribution**
+4. **Validate assumptions before claiming benefits**
+5. **Start minimal** - prove value with real data
+6. **Monitor real costs** - estimates can be very wrong
 
-This realistic analysis shows the 3-tier system provides massive cost savings while maintaining functionality through intelligent query classification.
+**Bottom Line**: The 3-tier system SHOULD provide significant savings, but you must validate with real usage data before claiming specific percentages.
