@@ -304,42 +304,49 @@ func (sa *SearchAgentImpl) Search(ctx context.Context, query *models.Query) (*mo
 		"scope_files":     sa.getScopeFilesCount(searchContext.ScopeInfo),
 	})
 
-	// Perform multi-strategy search
-	results, err := sa.performMultiStrategySearch(ctx, intent, searchContext)
+	// Use MCP context if available for enhanced search
+	var searchResults []*SearchAgentResult
+	
+	if query.MCPContext != nil && query.MCPContext.RequiresMCP {
+		searchResults, err = sa.searchWithMCPContext(ctx, intent, query.MCPContext)
+	} else {
+		searchResults, err = sa.performBasicSearch(ctx, intent, searchContext)
+	}
+	
 	if err != nil {
 		sa.metrics.ErrorCount++
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
 	sa.logStep("Completed multi-strategy search", map[string]interface{}{
-		"raw_results": len(results),
+		"raw_results": len(searchResults),
 	})
 
 	// Rerank and enhance results
 	if sa.config.EnableReranking {
-		results = sa.rerankResults(results, intent)
+		searchResults = sa.rerankResults(searchResults, intent)
 		sa.logStep("Reranked results", map[string]interface{}{
-			"reranked_results": len(results),
+			"reranked_results": len(searchResults),
 		})
 	}
 
 	// Add usage examples and context
 	if sa.config.IncludeContext {
-		results = sa.enhanceWithContext(ctx, results, intent)
+		searchResults = sa.enhanceWithContext(ctx, searchResults, intent)
 		sa.logStep("Enhanced results with context", map[string]interface{}{
-			"enhanced_results": len(results),
+			"enhanced_results": len(searchResults),
 		})
 	}
 
 	// Calculate confidence
-	confidence := sa.calculateSearchConfidence(results, intent)
+	confidence := sa.calculateSearchConfidence(searchResults, intent)
 
 	// Create comprehensive response
-	response := sa.buildSearchResponse(query, intent, results, confidence, startTime)
+	response := sa.buildSearchResponse(query, intent, searchResults, confidence, startTime)
 
 	sa.logStep("Search completed successfully", map[string]interface{}{
 		"response_id":    response.ID,
-		"total_results":  len(results),
+		"total_results":  len(searchResults),
 		"confidence":     confidence,
 		"total_time_ms":  time.Since(startTime).Milliseconds(),
 		"files_analyzed": response.Metadata.FilesAnalyzed,
@@ -347,9 +354,100 @@ func (sa *SearchAgentImpl) Search(ctx context.Context, query *models.Query) (*mo
 	})
 
 	// Update success metrics
-	sa.updateSuccessMetrics(startTime, confidence, len(results))
+	sa.updateSuccessMetrics(startTime, confidence, len(searchResults))
 
 	return response, nil
+}
+
+// searchWithMCPContext performs search enhanced with MCP command results
+func (sa *SearchAgentImpl) searchWithMCPContext(ctx context.Context, intent *SearchAgentIntent, mcpContext *models.MCPContext) ([]*SearchAgentResult, error) {
+	var results []*SearchAgentResult
+	
+	// Process MCP data to create search results
+	for operation, data := range mcpContext.Data {
+		switch operation {
+		case "list_files":
+			if fileData, ok := data.(map[string]interface{}); ok {
+				if files, ok := fileData["files"].([]string); ok {
+					for i, file := range files {
+						if i >= 10 { // Limit results
+							break
+						}
+						results = append(results, &SearchAgentResult{
+							File:        file,
+							Function:    "",
+							Line:        1,
+							Score:       0.9,
+							Context:     fmt.Sprintf("Go source file: %s", file),
+							Explanation: "Found in project file listing",
+						})
+					}
+				}
+			}
+			
+		case "file_count":
+			if countData, ok := data.(map[string]interface{}); ok {
+				if count, ok := countData["count"].(int); ok {
+					results = append(results, &SearchAgentResult{
+						File:        "project_summary",
+						Function:    "file_count",
+						Line:        0,
+						Score:       1.0,
+						Context:     fmt.Sprintf("Project contains %d Go files", count),
+						Explanation: "File count from filesystem analysis",
+					})
+				}
+			}
+			
+		case "memory_usage":
+			if memData, ok := data.(map[string]interface{}); ok {
+				if memInfo, ok := memData["memory_info"].(string); ok {
+					results = append(results, &SearchAgentResult{
+						File:        "system_info",
+						Function:    "memory_status",
+						Line:        0,
+						Score:       1.0,
+						Context:     memInfo,
+						Explanation: "Current system memory usage",
+					})
+				}
+			}
+			
+		case "project_structure":
+			if structData, ok := data.(map[string]interface{}); ok {
+				if dirs, ok := structData["directories"].([]string); ok {
+					results = append(results, &SearchAgentResult{
+						File:        "project_structure",
+						Function:    "directory_tree",
+						Line:        0,
+						Score:       1.0,
+						Context:     fmt.Sprintf("Project has %d directories: %s", len(dirs), strings.Join(dirs[:min(3, len(dirs))], ", ")),
+						Explanation: "Project directory structure",
+					})
+				}
+			}
+		}
+	}
+	
+	// If no MCP results, fall back to basic search
+	if len(results) == 0 {
+		return sa.performBasicSearch(ctx, intent, nil)
+	}
+	
+	return results, nil
+}
+
+// performBasicSearch performs basic vector/database search
+func (sa *SearchAgentImpl) performBasicSearch(ctx context.Context, intent *SearchAgentIntent, searchContext *SearchAgentContext) ([]*SearchAgentResult, error) {
+	// This is the existing multi-strategy search logic
+	return sa.performMultiStrategySearch(ctx, intent, searchContext)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ================================== fallback responses ==================================

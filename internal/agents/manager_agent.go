@@ -3,11 +3,14 @@ package agents
 import (
 	"context"
 	"fmt"
+	"os"
 	"math"
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/yourusername/useq-ai-assistant/internal/mcp"
+	"github.com/yourusername/useq-ai-assistant/internal/llm"
 	"github.com/yourusername/useq-ai-assistant/models"
 )
 
@@ -20,6 +23,8 @@ type ManagerAgent struct {
 	ContextAwareSearchAgent *ContextAwareSearchAgentImpl
 	SystemAgent             *SystemAgent
 	mcpClient               *mcp.MCPClient
+	intelligentProcessor    *mcp.IntelligentQueryProcessor
+	llmManager              *llm.Manager
 	metrics                 *AgentMetrics
 	routingHistory          []RoutingDecision
 }
@@ -28,6 +33,7 @@ type ManagerAgent struct {
 func NewManagerAgent(deps *AgentDependencies) *ManagerAgent {
 	manager := &ManagerAgent{
 		dependencies:   deps,
+		intelligentProcessor: mcp.NewIntelligentQueryProcessor(),
 		mcpClient:      mcp.NewMCPClient(),
 		routingHistory: make([]RoutingDecision, 0),
 		metrics: &AgentMetrics{
@@ -44,6 +50,9 @@ func NewManagerAgent(deps *AgentDependencies) *ManagerAgent {
 
 	// Initialize specialized agents with error handling
 	manager.initializeAgents(deps)
+	
+	// Initialize LLM manager with environment variables
+	manager.initializeLLMManager()
 	return manager
 }
 
@@ -68,6 +77,63 @@ func (ma *ManagerAgent) initializeAgents(deps *AgentDependencies) {
 	}
 }
 
+// initializeLLMManager initializes LLM manager with environment variables
+func (ma *ManagerAgent) initializeLLMManager() {
+	// Load environment variables
+	_ = godotenv.Load()
+	
+	openaiKey := os.Getenv("OPENAI_API_KEY")
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	
+	if openaiKey == "" && geminiKey == "" {
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Warn("No LLM API keys found in environment", nil)
+		}
+		return
+	}
+	
+	config := llm.AIProvidersConfig{
+		Primary:       "openai",
+		FallbackOrder: []string{"openai", "gemini"},
+		OpenAI: llm.ProviderConfig{
+			APIKey:      openaiKey,
+			Model:       "gpt-4-turbo-preview",
+			MaxTokens:   4000,
+			Temperature: 0.1,
+			Timeout:     30 * time.Second,
+		},
+		Gemini: llm.ProviderConfig{
+			APIKey:      geminiKey,
+			Model:       "gemini-1.5-pro",
+			MaxTokens:   4000,
+			Temperature: 0.1,
+			Timeout:     30 * time.Second,
+		},
+	}
+	
+	var err error
+	ma.llmManager, err = llm.NewManager(config)
+	if err != nil {
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Error("Failed to initialize LLM manager", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	} else {
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Info("LLM manager initialized successfully", map[string]interface{}{
+				"primary": config.Primary,
+				"fallbacks": config.FallbackOrder,
+			})
+		}
+		
+		// Update dependencies
+		if ma.dependencies != nil {
+			ma.dependencies.LLMManager = ma.llmManager
+		}
+	}
+}
+
 // RouteQuery intelligently routes queries to the most appropriate agent
 func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (response *models.Response, err error) {
 	// Add panic recovery with better error reporting
@@ -86,13 +152,35 @@ func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (re
 	startTime := time.Now()
 	ma.updateMetrics(startTime)
 
-	// Analyze query for intelligent routing with improved classification
+	// NEW: Use intelligent query processor for complex queries
+	if ma.shouldUseIntelligentProcessing(query) {
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Info("Using intelligent query processing", map[string]interface{}{
+				"query": query.UserInput,
+				"reason": "complex_query_detected",
+			})
+		}
+		
+		response, err := ma.intelligentProcessor.ProcessQuery(ctx, query)
+		if err == nil {
+			ma.updateSuccessMetrics(startTime, 0.9, response)
+			return response, nil
+		}
+		
+		if ma.dependencies != nil && ma.dependencies.Logger != nil {
+			ma.dependencies.Logger.Warn("Intelligent processing failed, falling back to agent routing", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// Fallback to traditional agent routing
 	routingAnalysis := ma.analyzeQueryForRouting(ctx, query)
 	if routingAnalysis == nil {
 		return nil, fmt.Errorf("failed to analyze query for routing")
 	}
 
-	// ENHANCED: Intelligent MCP Integration with Command Execution
+	// Enhanced MCP Integration with Command Execution
 	mcpContext, err := ma.mcpClient.ProcessQuery(ctx, query)
 	if err == nil && mcpContext != nil {
 		query.MCPContext = mcpContext
@@ -163,6 +251,32 @@ func (ma *ManagerAgent) RouteQuery(ctx context.Context, query *models.Query) (re
 
 	ma.updateSuccessMetrics(startTime, confidence, response)
 	return response, nil
+}
+
+// shouldUseIntelligentProcessing determines if query needs intelligent processing
+func (ma *ManagerAgent) shouldUseIntelligentProcessing(query *models.Query) bool {
+	input := strings.ToLower(query.UserInput)
+	
+	// Use intelligent processing for explanation queries
+	if strings.Contains(input, "explain") || strings.Contains(input, "flow") || 
+	   strings.Contains(input, "architecture") || strings.Contains(input, "how does") {
+		return true
+	}
+	
+	// Use for complex generation queries
+	if (strings.Contains(input, "create") || strings.Contains(input, "generate")) &&
+	   (strings.Contains(input, "service") || strings.Contains(input, "microservice") ||
+	    strings.Contains(input, "authentication") || strings.Contains(input, "api")) {
+		return true
+	}
+	
+	// Use for analysis queries
+	if strings.Contains(input, "analyze") || strings.Contains(input, "review") ||
+	   strings.Contains(input, "optimize") || strings.Contains(input, "refactor") {
+		return true
+	}
+	
+	return false
 }
 
 // analyzeQueryForRouting performs improved analysis of query for routing decisions

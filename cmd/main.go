@@ -21,6 +21,7 @@ import (
 	"github.com/yourusername/useq-ai-assistant/internal/app"
 	"github.com/yourusername/useq-ai-assistant/internal/llm"
 	"github.com/yourusername/useq-ai-assistant/internal/logger"
+	"github.com/yourusername/useq-ai-assistant/internal/mcp"
 	"github.com/yourusername/useq-ai-assistant/models"
 )
 
@@ -85,6 +86,13 @@ func runMaintenance() {
 }
 
 func main() {
+	// Load environment variables first
+	if err := godotenv.Load(); err != nil {
+		fmt.Printf("⚠️ No .env file found, using system environment variables\n")
+	} else {
+		fmt.Printf("✅ Loaded environment variables from .env\n")
+	}
+	
 	// Handle maintenance and logs commands first
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -94,6 +102,11 @@ func main() {
 		case "logs":
 			viewLogs()
 			return
+		case "mcp":
+			if len(os.Args) > 2 && os.Args[2] == "test" {
+				testMCPIntegration()
+				return
+			}
 		}
 	}
 
@@ -203,6 +216,39 @@ func main() {
 		os.Exit(1)
 	}
 	stepLogger.CompleteStep(cliStep, "CLI loop completed")
+}
+
+// testMCPIntegration tests the MCP integration
+func testMCPIntegration() {
+	fmt.Println("🧪 Testing MCP Integration...")
+	
+	// Test intelligent query processor
+	processor := mcp.NewIntelligentQueryProcessor()
+	
+	// Create test query
+	query := &models.Query{
+		ID:        "test_query_1",
+		UserInput: "explain the flow of this application",
+		Language:  "go",
+		Timestamp: time.Now(),
+		Context: models.QueryContext{
+			Environment: map[string]string{
+				"project_root": ".",
+			},
+		},
+	}
+	
+	ctx := context.Background()
+	response, err := processor.ProcessQuery(ctx, query)
+	if err != nil {
+		fmt.Printf("❌ MCP test failed: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("✅ MCP test successful!\n")
+	fmt.Printf("📝 Response: %s\n", response.Content.Text)
+	fmt.Printf("🤖 Agent: %s\n", response.AgentUsed)
+	fmt.Printf("⏱️  Time: %v\n", response.Metadata.GenerationTime)
 }
 
 // processQuery with enhanced logging
@@ -437,6 +483,15 @@ func runInteractiveCLI(ctx context.Context, cliApp *app.CLIApplication) error {
 		"prompt_symbol": promptSymbol,
 	})
 
+	// Show available MCP commands
+	fmt.Printf("💡 Available intelligent commands:\n")
+	fmt.Printf("  • 'show me current CPU usage' - System monitoring\n")
+	fmt.Printf("  • 'how many files are indexed' - File counting\n")
+	fmt.Printf("  • 'show project structure' - Directory tree\n")
+	fmt.Printf("  • 'git status' - Repository status\n")
+	fmt.Printf("  • 'list all Go files' - File discovery\n")
+	fmt.Printf("  • 'find authentication functions' - Code search\n")
+	fmt.Println()
 	for {
 		select {
 		case <-ctx.Done():
@@ -517,6 +572,11 @@ func runInteractiveCLI(ctx context.Context, cliApp *app.CLIApplication) error {
 				showStatus(cliApp)
 				stepLogger.CompleteStep(commandStep, "Status displayed")
 				continue
+			case "mcp test":
+				stepLogger.UpdateStep(commandStep, logger.StatusInProgress, "Testing MCP commands", nil)
+				testMCPCommands(cliApp)
+				stepLogger.CompleteStep(commandStep, "MCP test completed")
+				continue
 			default:
 				stepLogger.UpdateStep(commandStep, logger.StatusInProgress, "Processing as query", nil)
 				// Process the query
@@ -542,6 +602,50 @@ func runInteractiveCLI(ctx context.Context, cliApp *app.CLIApplication) error {
 	}
 }
 
+// testMCPCommands tests the MCP command execution system
+func testMCPCommands(cliApp *app.CLIApplication) {
+	fmt.Printf("🧪 Testing MCP Command Execution System\n")
+	fmt.Printf("═══════════════════════════════════════\n")
+	
+	testQueries := []string{
+		"show me current CPU usage",
+		"how many files are indexed",
+		"show project structure", 
+		"list all Go files",
+		"git status",
+	}
+	
+	for i, testQuery := range testQueries {
+		fmt.Printf("\n%d. Testing: '%s'\n", i+1, testQuery)
+		fmt.Printf("   🔄 Processing...\n")
+		
+		// Create test query
+		query := &models.Query{
+			ID:        fmt.Sprintf("test_%d", time.Now().UnixNano()),
+			UserInput: testQuery,
+			Language:  "go",
+			Timestamp: time.Now(),
+		}
+		
+		// Process through the system
+		ctx := context.Background()
+		response, err := cliApp.ProcessQuery(ctx, query)
+		if err != nil {
+			fmt.Printf("   ❌ Failed: %v\n", err)
+		} else {
+			fmt.Printf("   ✅ Success: %s\n", response.AgentUsed)
+			if response.Content.Text != "" {
+				// Show first line of response
+				lines := strings.Split(response.Content.Text, "\n")
+				if len(lines) > 0 {
+					fmt.Printf("   📝 %s\n", lines[0])
+				}
+			}
+		}
+	}
+	
+	fmt.Printf("\n✅ MCP testing completed\n\n")
+}
 // Add other enhanced functions with logging...
 func generateQueryID() string {
 	return fmt.Sprintf("query_%d", time.Now().UnixNano())

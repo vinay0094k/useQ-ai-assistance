@@ -18,6 +18,46 @@ type IntelligentExecutor struct {
 	executionHistory []ExecutionRecord
 }
 
+// executeMemoryCommand executes memory usage command
+func (ie *IntelligentExecutor) executeMemoryCommand(ctx context.Context) (map[string]interface{}, error) {
+	cmd := &CommandDefinition{
+		Name:     "memory_usage",
+		Command:  "ps",
+		Args:     []string{"-o", "pid,ppid,%mem,%cpu,comm"},
+		Category: "system",
+		Safety:   SafetyLevelSafe,
+	}
+	
+	return ie.executeCommand(ctx, cmd)
+}
+
+// executeFileCountCommand executes file count command
+func (ie *IntelligentExecutor) executeFileCountCommand(ctx context.Context) (map[string]interface{}, error) {
+	cmd := &CommandDefinition{
+		Name:     "file_count",
+		Command:  "find",
+		Args:     []string{".", "-name", "*.go", "-type", "f"},
+		Category: "filesystem",
+		Safety:   SafetyLevelSafe,
+	}
+	
+	result, err := ie.executeCommand(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Count lines in output
+	if output, ok := result.(map[string]interface{})["output"].(string); ok {
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		return map[string]interface{}{
+			"file_count": len(lines),
+			"files":      lines,
+		}, nil
+	}
+	
+	return result, nil
+}
+
 // CommandRegistry holds available commands and their metadata
 type CommandRegistry struct {
 	commands map[string]*CommandDefinition
