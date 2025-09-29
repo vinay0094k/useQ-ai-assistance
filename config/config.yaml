@@ -1,0 +1,45 @@
+# useQ AI Assistant Configuration
+app:
+  name: "useQ AI Assistant"
+  version: "1.0.0"
+  project_root: "."
+  extensions:
+    - ".go"
+    - ".js"
+    - ".py"
+    - ".md"
+    - ".json"
+  exclude_dirs:
+    - "vendor"
+    - "node_modules"
+    - ".git"
+    - "build"
+    - "dist"
+
+database:
+  path: "storage/useq.db"
+  timeout: "30s"
+
+ai:
+  primary: "openai"
+  fallbacks:
+    - "gemini"
+  openai:
+    model: "gpt-4-turbo-preview"
+    max_tokens: 4000
+    temperature: 0.1
+  gemini:
+    model: "gemini-1.5-pro"
+    max_tokens: 4000
+    temperature: 0.1
+
+logging:
+  level: "info"
+  enable_log: true
+  log_dir: "./logs"
+
+vector:
+  host: "localhost"
+  port: 6333
+  collection: "code_embeddings"
+  dimension: 1536
