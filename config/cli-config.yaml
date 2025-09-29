@@ -1,0 +1,59 @@
+cli:
+  prompt:
+    symbol: "useQ>"
+    color: "cyan"
+    bold: true
+  
+  display:
+    streaming: true
+    line_numbers: true
+    syntax_highlighting: true
+    progress_bars: true
+    realtime_updates: true
+    
+  interaction:
+    auto_save_session: true
+    session_timeout: "30m"
+    max_history: 100
+    clear_screen_on_start: false
+    
+  output:
+    format: "enhanced"  # enhanced, minimal, debug
+    show_tokens: true
+    show_cost: true
+    show_provider: true
+    show_timing: true
+    
+  feedback:
+    enable_rating: true
+    auto_learn: true
+    save_corrections: true
+    show_accuracy_stats: true
+
+performance:
+  response_timeout: "30s"
+  max_concurrent_requests: 3
+  cache_responses: true
+  cache_ttl: "1h"
+  
+  indexing:
+    batch_size: 100
+    parallel_workers: 4
+    incremental: true
+    watch_changes: true
+    
+agents:
+  routing:
+    confidence_threshold: 0.7
+    fallback_agent: "search"
+    enable_multi_agent: true
+    
+  timeout:
+    default: "30s"
+    coding: "60s"
+    debugging: "45s"
+    documentation: "20s"
+
+    # Why this file: 
+    # This configuration controls the CLI behavior, appearance, and user interaction patterns. 
+    # It defines how the useQ> prompt looks, streaming behavior, token display, and agent routing logic.

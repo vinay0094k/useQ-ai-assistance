@@ -1,0 +1,80 @@
+mcp_servers:
+  filesystem:
+    enabled: true
+    name: "filesystem-server"
+    command: "npx"
+    args: ["@modelcontextprotocol/server-filesystem"]
+    env:
+      FILESYSTEM_ROOT: "${PROJECT_ROOT}"
+      FILESYSTEM_ALLOWED_EXTENSIONS: ".go,.mod,.sum,.yaml,.yml,.json,.md"
+    timeout: "30s"
+    
+  git:
+    enabled: true
+    name: "git-server"
+    command: "npx" 
+    args: ["@modelcontextprotocol/server-git"]
+    env:
+      GIT_REPOSITORY: "${PROJECT_ROOT}"
+    timeout: "30s"
+    
+  github:
+    enabled: false  # Enable when needed
+    name: "github-server"
+    command: "npx"
+    args: ["@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+    timeout: "30s"
+    
+  sqlite:
+    enabled: true
+    name: "sqlite-server"
+    command: "npx"
+    args: ["@modelcontextprotocol/server-sqlite"]
+    env:
+      SQLITE_DATABASE: "${SQLITE_DB_PATH}"
+    timeout: "30s"
+    
+  docker:
+    enabled: false  # Enable when Docker integration needed
+    name: "docker-server"
+    command: "npx"
+    args: ["@modelcontextprotocol/server-docker"]
+    timeout: "30s"
+
+transport:
+  type: "stdio"
+  
+security:
+  allowed_operations:
+    - "read_file"
+    - "list_directory"
+    - "git_status"
+    - "git_log"
+    - "git_diff"
+    - "sqlite_query"
+  
+  restricted_paths:
+    - "/etc"
+    - "/var"
+    - "/usr"
+    - "/sys"
+    - "/proc"
+    - "~/.ssh"
+    - "~/.aws"
+    
+  max_file_size: "10MB"
+  max_response_size: "5MB"
+
+monitoring:
+  enable_logging: true
+  log_level: "info"
+  metrics:
+    enabled: true
+    include_timing: true
+    include_errors: true
+
+# Why this file: 
+# MCP (Model Context Protocol) servers extend our assistant's capabilities. 
+# This config defines which servers to use (filesystem for file ops, git for repo operations, sqlite for data queries) and their security constraints.

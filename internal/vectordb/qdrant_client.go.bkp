@@ -1,0 +1,605 @@
+package vectordb
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/qdrant/go-client/qdrant"
+)
+
+// QdrantClient enhanced for AI code assistant
+type QdrantClient struct {
+	client         *qdrant.Client
+	collectionName string
+	dimension      uint64
+	config         *QdrantConfig
+}
+
+// QdrantConfig holds enhanced configuration
+type QdrantConfig struct {
+	Host           string        `yaml:"host" json:"host"`
+	Port           int           `yaml:"port" json:"port"`
+	APIKey         string        `yaml:"api_key" json:"api_key"`
+	UseTLS         bool          `yaml:"use_tls" json:"use_tls"`
+	CollectionName string        `yaml:"collection_name" json:"collection_name"`
+	Dimension      uint64        `yaml:"dimension" json:"dimension"`
+	Timeout        time.Duration `yaml:"timeout" json:"timeout"`
+	BatchSize      int           `yaml:"batch_size" json:"batch_size"`
+	RetryAttempts  int           `yaml:"retry_attempts" json:"retry_attempts"`
+}
+
+// CodeEmbedding represents a code embedding with rich metadata
+type CodeEmbedding struct {
+	ID       string       `json:"id"`
+	Vector   []float32    `json:"vector"`
+	Metadata CodeMetadata `json:"metadata"`
+}
+
+// CodeMetadata represents metadata for code embeddings
+type CodeMetadata struct {
+	FilePath     string    `json:"file_path"`
+	FileName     string    `json:"file_name"`
+	Language     string    `json:"language"`
+	Type         string    `json:"type"`    // "function", "class", "file", "comment"
+	Name         string    `json:"name"`    // function name, class name, etc.
+	Content      string    `json:"content"` // actual code content
+	StartLine    int       `json:"start_line"`
+	EndLine      int       `json:"end_line"`
+	Visibility   string    `json:"visibility"` // "public", "private", "protected"
+	Package      string    `json:"package"`
+	Dependencies []string  `json:"dependencies"`
+	LastModified time.Time `json:"last_modified"`
+	Size         int       `json:"size"`
+	Complexity   int       `json:"complexity"`
+}
+
+// ToMap converts CodeMetadata to map[string]interface{}
+func (cm *CodeMetadata) ToMap() map[string]interface{} {
+	return map[string]interface{}{
+		"file_path":     cm.FilePath,
+		"file_name":     cm.FileName,
+		"language":      cm.Language,
+		"type":          cm.Type,
+		"name":          cm.Name,
+		"content":       cm.Content,
+		"start_line":    cm.StartLine,
+		"end_line":      cm.EndLine,
+		"visibility":    cm.Visibility,
+		"package":       cm.Package,
+		"dependencies":  cm.Dependencies,
+		"last_modified": cm.LastModified,
+		"size":          cm.Size,
+		"complexity":    cm.Complexity,
+	}
+}
+
+// SearchFilter represents search filters
+type SearchFilter struct {
+	Language      []string `json:"language,omitempty"`
+	Type          []string `json:"type,omitempty"`
+	FilePath      []string `json:"file_path,omitempty"`
+	Package       []string `json:"package,omitempty"`
+	Visibility    []string `json:"visibility,omitempty"`
+	MinComplexity int      `json:"min_complexity,omitempty"`
+	MaxComplexity int      `json:"max_complexity,omitempty"`
+}
+
+// SearchResult enhanced with metadata
+type SearchResult struct {
+	ID       string       `json:"id"`
+	Score    float32      `json:"score"`
+	Vector   []float32    `json:"vector,omitempty"`
+	Metadata CodeMetadata `json:"metadata"`
+}
+
+// NewQdrantClient creates an enhanced Qdrant client
+func NewQdrantClient(host string, port int) (*QdrantClient, error) {
+	config := &QdrantConfig{
+		Host:           host,
+		Port:           port,
+		CollectionName: "code_embeddings",
+		Dimension:      384, // Default for sentence-transformers
+		Timeout:        30 * time.Second,
+		BatchSize:      100,
+		RetryAttempts:  3,
+	}
+
+	return NewQdrantClientWithConfig(config)
+}
+
+// NewQdrantClientWithConfig creates client with full configuration
+func NewQdrantClientWithConfig(config *QdrantConfig) (*QdrantClient, error) {
+	clientConfig := &qdrant.Config{
+		Host:   config.Host,
+		Port:   config.Port,
+		APIKey: config.APIKey,
+		UseTLS: config.UseTLS,
+	}
+
+	client, err := qdrant.NewClient(clientConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Qdrant client: %w", err)
+	}
+
+	qc := &QdrantClient{
+		client:         client,
+		collectionName: config.CollectionName,
+		dimension:      config.Dimension,
+		config:         config,
+	}
+
+	log.Printf("✅ Connected to Qdrant at %s:%d", config.Host, config.Port)
+	return qc, nil
+}
+
+// InitializeCollection creates collection with proper indexes for code search
+func (qc *QdrantClient) InitializeCollection(ctx context.Context) error {
+	exists, err := qc.CollectionExists(ctx, qc.collectionName)
+	if err != nil {
+		return fmt.Errorf("failed to check collection existence: %w", err)
+	}
+
+	if exists {
+		log.Printf("✅ Collection '%s' already exists", qc.collectionName)
+		return nil
+	}
+
+	err = qc.CreateCollection(ctx, qc.collectionName, qc.dimension)
+	if err != nil {
+		return fmt.Errorf("failed to create collection: %w", err)
+	}
+
+	log.Printf("✅ Created collection '%s' with dimension %d", qc.collectionName, qc.dimension)
+	return nil
+}
+
+// Close closes the Qdrant connection
+func (qc *QdrantClient) Close() error {
+	return qc.client.Close()
+}
+
+// CreateCollection creates a collection with enhanced configuration
+func (qc *QdrantClient) CreateCollection(ctx context.Context, name string, vectorSize uint64) error {
+	return qc.client.CreateCollection(ctx, &qdrant.CreateCollection{
+		CollectionName: name,
+		VectorsConfig: &qdrant.VectorsConfig{
+			Config: &qdrant.VectorsConfig_Params{
+				Params: &qdrant.VectorParams{
+					Size:     vectorSize,
+					Distance: qdrant.Distance_Cosine,
+				},
+			},
+		},
+		OptimizersConfig: &qdrant.OptimizersConfigDiff{
+			DefaultSegmentNumber: uint64Ptr(2),
+		},
+		ReplicationFactor:      uint32Ptr(1),
+		WriteConsistencyFactor: uint32Ptr(1),
+	})
+}
+
+// CollectionExists checks if collection exists
+func (qc *QdrantClient) CollectionExists(ctx context.Context, name string) (bool, error) {
+	_, err := qc.client.GetCollectionInfo(ctx, name)
+	return err == nil, nil
+}
+
+// UpsertCodeEmbedding upserts a single code embedding
+func (qc *QdrantClient) UpsertCodeEmbedding(ctx context.Context, embedding *CodeEmbedding) error {
+	return qc.UpsertCodeEmbeddings(ctx, []*CodeEmbedding{embedding})
+}
+
+// UpsertCodeEmbeddings upserts multiple code embeddings with retry logic
+func (qc *QdrantClient) UpsertCodeEmbeddings(ctx context.Context, embeddings []*CodeEmbedding) error {
+	if len(embeddings) == 0 {
+		return nil
+	}
+
+	// Convert to Qdrant points
+	points := make([]*qdrant.PointStruct, len(embeddings))
+	for i, emb := range embeddings {
+		points[i] = &qdrant.PointStruct{
+			Id: &qdrant.PointId{
+				PointIdOptions: &qdrant.PointId_Uuid{Uuid: emb.ID},
+			},
+			Vectors: &qdrant.Vectors{
+				VectorsOptions: &qdrant.Vectors_Vector{
+					Vector: &qdrant.Vector{Data: emb.Vector},
+				},
+			},
+			Payload: qc.convertMetadataToPayload(emb.Metadata),
+		}
+	}
+
+	// Retry logic
+	var err error
+	for attempt := 0; attempt < qc.config.RetryAttempts; attempt++ {
+		_, err = qc.client.Upsert(ctx, &qdrant.UpsertPoints{
+			CollectionName: qc.collectionName,
+			Points:         points,
+			Wait:           boolPtr(true),
+		})
+		if err == nil {
+			log.Printf("✅ Upserted %d code embeddings", len(embeddings))
+			return nil
+		}
+		log.Printf("⚠️ Upsert attempt %d failed: %v", attempt+1, err)
+		time.Sleep(time.Duration(attempt+1) * time.Second)
+	}
+
+	return fmt.Errorf("failed to upsert after %d attempts: %w", qc.config.RetryAttempts, err)
+}
+
+// SearchCode performs semantic code search with filters
+func (qc *QdrantClient) SearchCode(ctx context.Context, vector []float32, limit uint64, filter *SearchFilter, withVector bool) ([]*SearchResult, error) {
+	queryRequest := &qdrant.QueryPoints{
+		CollectionName: qc.collectionName,
+		Query: &qdrant.Query{
+			Variant: &qdrant.Query_Nearest{
+				Nearest: &qdrant.VectorInput{
+					Variant: &qdrant.VectorInput_Dense{
+						Dense: &qdrant.DenseVector{Data: vector},
+					},
+				},
+			},
+		},
+		Limit: &limit,
+		WithPayload: &qdrant.WithPayloadSelector{
+			SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: true},
+		},
+	}
+
+	// Apply filters
+	if filter != nil {
+		queryRequest.Filter = qc.buildFilter(filter)
+	}
+
+	resp, err := qc.client.Query(ctx, queryRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search: %w", err)
+	}
+
+	// Convert results
+	results := make([]*SearchResult, len(resp))
+	for i, point := range resp {
+		result := &SearchResult{
+			ID:    point.Id.GetUuid(),
+			Score: point.Score,
+		}
+
+		if withVector && point.Vectors != nil {
+			if vector := point.Vectors.GetVector(); vector != nil {
+				result.Vector = vector.Data
+			}
+		}
+
+		if point.Payload != nil {
+			result.Metadata = qc.convertPayloadToMetadata(point.Payload)
+		}
+
+		results[i] = result
+	}
+
+	return results, nil
+}
+
+// SearchByFunction finds similar functions
+func (qc *QdrantClient) SearchByFunction(ctx context.Context, vector []float32, language string, limit uint64) ([]*SearchResult, error) {
+	filter := &SearchFilter{
+		Type:     []string{"function"},
+		Language: []string{language},
+	}
+	return qc.SearchCode(ctx, vector, limit, filter, false)
+}
+
+// SearchByFile finds similar files
+func (qc *QdrantClient) SearchByFile(ctx context.Context, vector []float32, language string, limit uint64) ([]*SearchResult, error) {
+	filter := &SearchFilter{
+		Type:     []string{"file"},
+		Language: []string{language},
+	}
+	return qc.SearchCode(ctx, vector, limit, filter, false)
+}
+
+// SearchByContent performs general content search
+func (qc *QdrantClient) SearchByContent(ctx context.Context, vector []float32, limit uint64) ([]*SearchResult, error) {
+	return qc.SearchCode(ctx, vector, limit, nil, false)
+}
+
+func (qc *QdrantClient) SearchByText(ctx context.Context, query string, limit uint64) ([]*SearchResult, error) {
+	// For now, return empty results - would need embedding service to convert text to vector
+	return []*SearchResult{}, nil
+}
+
+// DeleteCodeEmbeddings deletes embeddings by IDs
+func (qc *QdrantClient) DeleteCodeEmbeddings(ctx context.Context, pointIds []string) error {
+	if len(pointIds) == 0 {
+		return nil
+	}
+
+	ids := make([]*qdrant.PointId, len(pointIds))
+	for i, id := range pointIds {
+		ids[i] = &qdrant.PointId{
+			PointIdOptions: &qdrant.PointId_Uuid{Uuid: id},
+		}
+	}
+
+	_, err := qc.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: qc.collectionName,
+		Points: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+				Points: &qdrant.PointsIdsList{Ids: ids},
+			},
+		},
+		Wait: boolPtr(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete embeddings: %w", err)
+	}
+
+	log.Printf("✅ Deleted %d code embeddings", len(pointIds))
+	return err
+}
+
+// DeleteByFilePath deletes all embeddings for a specific file
+func (qc *QdrantClient) DeleteByFilePath(ctx context.Context, filePath string) error {
+	// Build filter for file path
+	filter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			{
+				ConditionOneOf: &qdrant.Condition_Field{
+					Field: &qdrant.FieldCondition{
+						Key: "file_path",
+						Match: &qdrant.Match{
+							MatchValue: &qdrant.Match_Keyword{Keyword: filePath},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := qc.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: qc.collectionName,
+		Points: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
+				Filter: filter,
+			},
+		},
+		Wait: boolPtr(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete embeddings for file %s: %w", filePath, err)
+	}
+
+	log.Printf("✅ Deleted embeddings for file: %s", filePath)
+	return nil
+}
+
+// GetCodeEmbeddings retrieves embeddings by IDs
+func (qc *QdrantClient) GetCodeEmbeddings(ctx context.Context, pointIds []string) ([]*CodeEmbedding, error) {
+	if len(pointIds) == 0 {
+		return []*CodeEmbedding{}, nil
+	}
+
+	ids := make([]*qdrant.PointId, len(pointIds))
+	for i, id := range pointIds {
+		ids[i] = &qdrant.PointId{
+			PointIdOptions: &qdrant.PointId_Uuid{Uuid: id},
+		}
+	}
+
+	points, err := qc.client.Get(ctx, &qdrant.GetPoints{
+		CollectionName: qc.collectionName,
+		Ids:            ids,
+		WithPayload: &qdrant.WithPayloadSelector{
+			SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: true},
+		},
+		WithVectors: &qdrant.WithVectorsSelector{
+			SelectorOptions: &qdrant.WithVectorsSelector_Enable{Enable: true},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get embeddings: %w", err)
+	}
+
+	embeddings := make([]*CodeEmbedding, len(points))
+	for i, point := range points {
+		embedding := &CodeEmbedding{
+			ID: point.Id.GetUuid(),
+		}
+
+		if point.Vectors != nil {
+			if vector := point.Vectors.GetVector(); vector != nil {
+				embedding.Vector = vector.Data
+			}
+		}
+
+		if point.Payload != nil {
+			embedding.Metadata = qc.convertPayloadToMetadata(point.Payload)
+		}
+
+		embeddings[i] = embedding
+	}
+
+	return embeddings, nil
+}
+
+// CountByLanguage returns count of embeddings by language
+func (qc *QdrantClient) CountByLanguage(ctx context.Context, language string) (uint64, error) {
+	filter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			{
+				ConditionOneOf: &qdrant.Condition_Field{
+					Field: &qdrant.FieldCondition{
+						Key: "language",
+						Match: &qdrant.Match{
+							MatchValue: &qdrant.Match_Keyword{Keyword: language},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return qc.client.Count(ctx, &qdrant.CountPoints{
+		CollectionName: qc.collectionName,
+		Filter:         filter,
+		Exact:          boolPtr(true),
+	})
+}
+
+// GetCollectionStats returns collection statistics
+func (qc *QdrantClient) GetCollectionStats(ctx context.Context) (*qdrant.CollectionInfo, error) {
+	return qc.client.GetCollectionInfo(ctx, qc.collectionName)
+}
+
+// HealthCheck performs health check
+func (qc *QdrantClient) HealthCheck(ctx context.Context) error {
+	_, err := qc.client.HealthCheck(ctx)
+	return err
+}
+
+// Helper methods
+
+// buildFilter builds Qdrant filter from SearchFilter
+func (qc *QdrantClient) buildFilter(filter *SearchFilter) *qdrant.Filter {
+	var conditions []*qdrant.Condition
+
+	// Language filter
+	if len(filter.Language) > 0 {
+		for _, lang := range filter.Language {
+			conditions = append(conditions, &qdrant.Condition{
+				ConditionOneOf: &qdrant.Condition_Field{
+					Field: &qdrant.FieldCondition{
+						Key: "language",
+						Match: &qdrant.Match{
+							MatchValue: &qdrant.Match_Keyword{Keyword: lang},
+						},
+					},
+				},
+			})
+		}
+	}
+
+	// Type filter
+	if len(filter.Type) > 0 {
+		for _, typ := range filter.Type {
+			conditions = append(conditions, &qdrant.Condition{
+				ConditionOneOf: &qdrant.Condition_Field{
+					Field: &qdrant.FieldCondition{
+						Key: "type",
+						Match: &qdrant.Match{
+							MatchValue: &qdrant.Match_Keyword{Keyword: typ},
+						},
+					},
+				},
+			})
+		}
+	}
+
+	// File path filter
+	if len(filter.FilePath) > 0 {
+		for _, path := range filter.FilePath {
+			conditions = append(conditions, &qdrant.Condition{
+				ConditionOneOf: &qdrant.Condition_Field{
+					Field: &qdrant.FieldCondition{
+						Key: "file_path",
+						Match: &qdrant.Match{
+							MatchValue: &qdrant.Match_Keyword{Keyword: path},
+						},
+					},
+				},
+			})
+		}
+	}
+
+	return &qdrant.Filter{Must: conditions}
+}
+
+// convertMetadataToPayload converts CodeMetadata to Qdrant payload
+func (qc *QdrantClient) convertMetadataToPayload(metadata CodeMetadata) map[string]*qdrant.Value {
+	return map[string]*qdrant.Value{
+		"file_path":     stringValue(metadata.FilePath),
+		"file_name":     stringValue(metadata.FileName),
+		"language":      stringValue(metadata.Language),
+		"type":          stringValue(metadata.Type),
+		"name":          stringValue(metadata.Name),
+		"content":       stringValue(metadata.Content),
+		"start_line":    intValue(int64(metadata.StartLine)),
+		"end_line":      intValue(int64(metadata.EndLine)),
+		"visibility":    stringValue(metadata.Visibility),
+		"package":       stringValue(metadata.Package),
+		"size":          intValue(int64(metadata.Size)),
+		"complexity":    intValue(int64(metadata.Complexity)),
+		"last_modified": stringValue(metadata.LastModified.Format(time.RFC3339)),
+	}
+}
+
+// convertPayloadToMetadata converts Qdrant payload to CodeMetadata
+func (qc *QdrantClient) convertPayloadToMetadata(payload map[string]*qdrant.Value) CodeMetadata {
+	metadata := CodeMetadata{}
+
+	if v := payload["file_path"]; v != nil {
+		metadata.FilePath = v.GetStringValue()
+	}
+	if v := payload["file_name"]; v != nil {
+		metadata.FileName = v.GetStringValue()
+	}
+	if v := payload["language"]; v != nil {
+		metadata.Language = v.GetStringValue()
+	}
+	if v := payload["type"]; v != nil {
+		metadata.Type = v.GetStringValue()
+	}
+	if v := payload["name"]; v != nil {
+		metadata.Name = v.GetStringValue()
+	}
+	if v := payload["content"]; v != nil {
+		metadata.Content = v.GetStringValue()
+	}
+	if v := payload["start_line"]; v != nil {
+		metadata.StartLine = int(v.GetIntegerValue())
+	}
+	if v := payload["end_line"]; v != nil {
+		metadata.EndLine = int(v.GetIntegerValue())
+	}
+	if v := payload["visibility"]; v != nil {
+		metadata.Visibility = v.GetStringValue()
+	}
+	if v := payload["package"]; v != nil {
+		metadata.Package = v.GetStringValue()
+	}
+	if v := payload["size"]; v != nil {
+		metadata.Size = int(v.GetIntegerValue())
+	}
+	if v := payload["complexity"]; v != nil {
+		metadata.Complexity = int(v.GetIntegerValue())
+	}
+	if v := payload["last_modified"]; v != nil {
+		if parsed, err := time.Parse(time.RFC3339, v.GetStringValue()); err == nil {
+			metadata.LastModified = parsed
+		}
+	}
+
+	return metadata
+}
+
+// Helper functions for Qdrant values
+func stringValue(s string) *qdrant.Value {
+	return &qdrant.Value{Kind: &qdrant.Value_StringValue{StringValue: s}}
+}
+
+func intValue(i int64) *qdrant.Value {
+	return &qdrant.Value{Kind: &qdrant.Value_IntegerValue{IntegerValue: i}}
+}
+
+func boolValue(b bool) *qdrant.Value {
+	return &qdrant.Value{Kind: &qdrant.Value_BoolValue{BoolValue: b}}
+}
+
+func uint64Ptr(v uint64) *uint64 { return &v }
+func uint32Ptr(v uint32) *uint32 { return &v }
+func boolPtr(v bool) *bool       { return &v }
