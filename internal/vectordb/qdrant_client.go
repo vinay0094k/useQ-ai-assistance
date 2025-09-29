@@ -17,32 +17,145 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// NewQdrantClient creates a new Qdrant client with gRPC primary and HTTP fallback
+// NewQdrantClient creates a new Qdrant client with intelligent connection handling
 func NewQdrantClient(config *QdrantConfig) (*QdrantClient, error) {
 	qc := &QdrantClient{
 		config:     config,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 
-	// Try to establish gRPC connection first
+	// Try gRPC first, fallback to HTTP
 	if err := qc.setupGRPCConnection(); err != nil {
 		fmt.Printf("⚠️ gRPC connection failed: %v\n", err)
 		fmt.Printf("🔄 Testing HTTP fallback...\n")
 
-		// Test HTTP connection
 		if err := qc.testHTTPConnection(); err != nil {
 			return nil, fmt.Errorf("both gRPC and HTTP connections failed - gRPC: %v, HTTP: %v", err, err)
 		}
-		fmt.Printf("✅ HTTP connection successful, will use HTTP API\n")
+		fmt.Printf("✅ HTTP connection successful\n")
 	}
 
-	// Initialize collection if needed
+	// Initialize collection
 	if err := qc.ensureCollection(context.Background()); err != nil {
 		fmt.Printf("⚠️ Failed to ensure collection exists: %v\n", err)
 	}
 
 	return qc, nil
 }
+
+// Search performs intelligent vector search with tier-aware optimization
+func (qc *QdrantClient) Search(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
+	// Generate embedding for the query
+	embedding, err := qc.generateQueryEmbedding(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
+	}
+
+	// Try gRPC first if available
+	if qc.useGRPC {
+		results, err := qc.searchVectorsGRPC(ctx, embedding, limit)
+		if err == nil {
+			return results, nil
+		}
+		fmt.Printf("⚠️ gRPC search failed, falling back to HTTP: %v\n", err)
+		qc.useGRPC = false
+	}
+
+	// Fallback to HTTP API
+	return qc.searchVectorsHTTP(ctx, embedding, limit)
+}
+
+// StoreChunkWithEmbedding stores a code chunk with its embedding
+func (qc *QdrantClient) StoreChunkWithEmbedding(ctx context.Context, chunk *CodeChunk, embedding []float32) error {
+	// Generate numeric ID from string ID
+	hash := fnv.New32a()
+	hash.Write([]byte(chunk.ID))
+	numericID := hash.Sum32()
+
+	if qc.useGRPC {
+		return qc.storeChunkGRPC(ctx, chunk, embedding, uint64(numericID))
+	}
+
+	return qc.storeChunkHTTP(ctx, chunk, embedding, numericID)
+}
+
+// GenerateOpenAIEmbedding generates OpenAI embeddings with caching
+func (qc *QdrantClient) GenerateOpenAIEmbedding(ctx context.Context, text string) ([]float32, error) {
+	return qc.generateOpenAIEmbedding(ctx, text)
+}
+
+// GetStats returns collection statistics for monitoring
+func (qc *QdrantClient) GetStats(ctx context.Context) (map[string]interface{}, error) {
+	if qc.useGRPC {
+		resp, err := qc.collectionsClient.Get(ctx, &qdrant.GetCollectionInfoRequest{
+			CollectionName: qc.config.Collection,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return map[string]interface{}{
+			"result": map[string]interface{}{
+				"points_count":         resp.Result.PointsCount,
+				"vectors_count":        resp.Result.VectorsCount,
+				"indexed_vectors_count": resp.Result.PointsCount,
+				"status":               resp.Result.Status.String(),
+			},
+		}, nil
+	}
+
+	// HTTP fallback
+	url := fmt.Sprintf("http://%s:%d/collections/%s", qc.config.Host, qc.config.Port, qc.config.Collection)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := qc.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// Health checks if the Qdrant instance is healthy
+func (qc *QdrantClient) Health(ctx context.Context) error {
+	if qc.useGRPC {
+		_, err := qc.collectionsClient.List(ctx, &qdrant.ListCollectionsRequest{})
+		return err
+	}
+	return qc.testHTTPConnection()
+}
+
+// Close closes the gRPC connection if active
+func (qc *QdrantClient) Close() error {
+	if qc.conn != nil {
+		return qc.conn.Close()
+	}
+	return nil
+}
+
+// OptimizeCollection optimizes the vector collection
+func (qc *QdrantClient) OptimizeCollection(ctx context.Context) error {
+	url := fmt.Sprintf("http://%s:%d/collections/%s/cluster", qc.config.Host, qc.config.Port, qc.config.Collection)
+	resp, err := qc.httpClient.Post(url, "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+// =============================================================================
+// PRIVATE IMPLEMENTATION METHODS
+// =============================================================================
 
 // setupGRPCConnection establishes and tests gRPC connection
 func (qc *QdrantClient) setupGRPCConnection() error {
@@ -55,12 +168,11 @@ func (qc *QdrantClient) setupGRPCConnection() error {
 		return fmt.Errorf("failed to dial gRPC: %w", err)
 	}
 
-	// Create clients
 	qc.conn = conn
 	qc.pointsClient = qdrant.NewPointsClient(conn)
 	qc.collectionsClient = qdrant.NewCollectionsClient(conn)
 
-	// Test connection with timeout
+	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -101,7 +213,6 @@ func (qc *QdrantClient) testHTTPConnection() error {
 
 // ensureCollection creates collection if it doesn't exist
 func (qc *QdrantClient) ensureCollection(ctx context.Context) error {
-	// Check if collection exists
 	exists, err := qc.collectionExists(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to check collection existence: %w", err)
@@ -112,7 +223,6 @@ func (qc *QdrantClient) ensureCollection(ctx context.Context) error {
 		return nil
 	}
 
-	// Create collection
 	fmt.Printf("🔄 Creating collection '%s'...\n", qc.config.Collection)
 	return qc.createCollection(ctx)
 }
@@ -123,14 +233,9 @@ func (qc *QdrantClient) collectionExists(ctx context.Context) (bool, error) {
 		_, err := qc.collectionsClient.Get(ctx, &qdrant.GetCollectionInfoRequest{
 			CollectionName: qc.config.Collection,
 		})
-		if err != nil {
-			// Collection doesn't exist
-			return false, nil
-		}
-		return true, nil
+		return err == nil, nil
 	}
 
-	// HTTP fallback
 	url := fmt.Sprintf("http://%s:%d/collections/%s", qc.config.Host, qc.config.Port, qc.config.Collection)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -198,28 +303,6 @@ func (qc *QdrantClient) createCollection(ctx context.Context) error {
 	return nil
 }
 
-// Search performs semantic search with automatic gRPC/HTTP fallback
-func (qc *QdrantClient) Search(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
-	// Generate embedding for the query
-	embedding, err := qc.generateQueryEmbedding(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
-	}
-
-	// Try gRPC first if available
-	if qc.useGRPC {
-		results, err := qc.searchVectorsGRPC(ctx, embedding, limit)
-		if err == nil {
-			return results, nil
-		}
-		fmt.Printf("⚠️ gRPC search failed, falling back to HTTP: %v\n", err)
-		qc.useGRPC = false // Disable gRPC for future requests if it fails
-	}
-
-	// Fallback to HTTP API
-	return qc.searchVectorsHTTP(ctx, embedding, limit)
-}
-
 // generateQueryEmbedding generates embedding for search query
 func (qc *QdrantClient) generateQueryEmbedding(ctx context.Context, query string) ([]float32, error) {
 	// Try OpenAI embeddings first if API key is available
@@ -231,8 +314,56 @@ func (qc *QdrantClient) generateQueryEmbedding(ctx context.Context, query string
 		fmt.Printf("⚠️ OpenAI embedding failed, using fallback: %v\n", err)
 	}
 
-	// Fallback to simple hash-based embedding (for testing)
+	// Fallback to simple hash-based embedding
 	return qc.generateSimpleEmbedding(query), nil
+}
+
+// generateOpenAIEmbedding generates OpenAI embeddings
+func (qc *QdrantClient) generateOpenAIEmbedding(ctx context.Context, text string) ([]float32, error) {
+	reqBody := map[string]interface{}{
+		"input": text,
+		"model": "text-embedding-3-small",
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/embeddings", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := qc.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("OpenAI API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var embeddingResp struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&embeddingResp); err != nil {
+		return nil, err
+	}
+
+	if len(embeddingResp.Data) == 0 {
+		return nil, fmt.Errorf("no embeddings returned from OpenAI")
+	}
+
+	return embeddingResp.Data[0].Embedding, nil
 }
 
 // generateSimpleEmbedding creates a simple hash-based embedding for testing
@@ -374,20 +505,6 @@ func (qc *QdrantClient) searchVectorsHTTP(ctx context.Context, embedding []float
 	return results, nil
 }
 
-// StoreChunkWithEmbedding stores a code chunk with its embedding
-func (qc *QdrantClient) StoreChunkWithEmbedding(ctx context.Context, chunk *CodeChunk, embedding []float32) error {
-	// Generate numeric ID from string ID
-	hash := fnv.New32a()
-	hash.Write([]byte(chunk.ID))
-	numericID := hash.Sum32()
-
-	if qc.useGRPC {
-		return qc.storeChunkGRPC(ctx, chunk, embedding, uint64(numericID))
-	}
-
-	return qc.storeChunkHTTP(ctx, chunk, embedding, numericID)
-}
-
 // storeChunkGRPC stores chunk using gRPC
 func (qc *QdrantClient) storeChunkGRPC(ctx context.Context, chunk *CodeChunk, embedding []float32, id uint64) error {
 	point := &qdrant.PointStruct{
@@ -462,129 +579,7 @@ func (qc *QdrantClient) storeChunkHTTP(ctx context.Context, chunk *CodeChunk, em
 	return nil
 }
 
-// generateOpenAIEmbedding generates OpenAI embeddings
-func (qc *QdrantClient) generateOpenAIEmbedding(ctx context.Context, text string) ([]float32, error) {
-	reqBody := map[string]interface{}{
-		"input": text,
-		"model": "text-embedding-3-small",
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/embeddings", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := qc.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("OpenAI API error %d: %s", resp.StatusCode, string(body))
-	}
-
-	var embeddingResp struct {
-		Data []struct {
-			Embedding []float32 `json:"embedding"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&embeddingResp); err != nil {
-		return nil, err
-	}
-
-	if len(embeddingResp.Data) == 0 {
-		return nil, fmt.Errorf("no embeddings returned from OpenAI")
-	}
-
-	return embeddingResp.Data[0].Embedding, nil
-}
-
-// GetStats returns collection statistics
-func (qc *QdrantClient) GetStats(ctx context.Context) (map[string]interface{}, error) {
-	if qc.useGRPC {
-		resp, err := qc.collectionsClient.Get(ctx, &qdrant.GetCollectionInfoRequest{
-			CollectionName: qc.config.Collection,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		return map[string]interface{}{
-			"points_count": resp.Result.PointsCount,
-			"segments":     resp.Result.SegmentsCount,
-			"status":       resp.Result.Status.String(),
-		}, nil
-	}
-
-	// HTTP fallback
-	url := fmt.Sprintf("http://%s:%d/collections/%s", qc.config.Host, qc.config.Port, qc.config.Collection)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := qc.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// Close closes the gRPC connection if active
-func (qc *QdrantClient) Close() error {
-	if qc.conn != nil {
-		return qc.conn.Close()
-	}
-	return nil
-}
-
-// Health checks if the Qdrant instance is healthy
-func (qc *QdrantClient) Health(ctx context.Context) error {
-	if qc.useGRPC {
-		_, err := qc.collectionsClient.List(ctx, &qdrant.ListCollectionsRequest{})
-		return err
-	}
-
-	return qc.testHTTPConnection()
-}
-
-// Compatibility methods for other files
-func (qc *QdrantClient) OptimizeCollection(ctx context.Context) error {
-	url := fmt.Sprintf("http://%s:%d/collections/%s/cluster", qc.config.Host, qc.config.Port, qc.config.Collection)
-	resp, err := qc.httpClient.Post(url, "application/json", nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return nil
-}
-
-func (qc *QdrantClient) GenerateOpenAIEmbedding(ctx context.Context, text string) ([]float32, error) {
-	return qc.generateOpenAIEmbedding(ctx, text)
-}
-
-func (qc *QdrantClient) searchVectors(ctx context.Context, embedding []float32, limit int) ([]*SearchResult, error) {
-	return qc.searchVectorsHTTP(ctx, embedding, limit)
-}
-
+// Upsert compatibility method for other parts of the system
 func (qc *QdrantClient) Upsert(ctx context.Context, points []*qdrant.PointStruct) error {
 	if qc.pointsClient != nil {
 		_, err := qc.pointsClient.Upsert(ctx, &qdrant.UpsertPoints{
@@ -594,4 +589,9 @@ func (qc *QdrantClient) Upsert(ctx context.Context, points []*qdrant.PointStruct
 		return err
 	}
 	return fmt.Errorf("gRPC client not available for Upsert")
+}
+
+// searchVectors compatibility method
+func (qc *QdrantClient) searchVectors(ctx context.Context, embedding []float32, limit int) ([]*SearchResult, error) {
+	return qc.searchVectorsHTTP(ctx, embedding, limit)
 }
